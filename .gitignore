@@ -75,3 +75,5 @@ release.pub
 *.pub
 
 update-server/
+
+wireguard-windows/

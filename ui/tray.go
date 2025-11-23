@@ -8,10 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/fosrl/windows/config"
+	"github.com/fosrl/windows/managers"
 	"github.com/fosrl/windows/updater"
 	"github.com/fosrl/windows/version"
 
@@ -21,17 +21,20 @@ import (
 )
 
 var (
-	trayIcon        *walk.NotifyIcon
-	contextMenu     *walk.Menu
-	mainWindow      *walk.MainWindow
-	availableUpdate *updater.UpdateFound
-	updateMutex     sync.RWMutex
-	updateAction    *walk.Action // Action for "Update Available" menu item
-	labelAction     *walk.Action
-	loginAction     *walk.Action
-	connectAction   *walk.Action
-	moreAction      *walk.Action
-	quitAction      *walk.Action
+	trayIcon          *walk.NotifyIcon
+	contextMenu       *walk.Menu
+	mainWindow        *walk.MainWindow
+	hasUpdate         bool
+	updateMutex       sync.RWMutex
+	updateAction      *walk.Action // Action for "Update Available" menu item
+	labelAction       *walk.Action
+	loginAction       *walk.Action
+	connectAction     *walk.Action
+	moreAction        *walk.Action
+	quitAction        *walk.Action
+	updateFoundCb     *managers.UpdateFoundCallback
+	updateProgressCb  *managers.UpdateProgressCallback
+	managerStoppingCb *managers.ManagerStoppingCallback
 )
 
 // setTrayIcon updates the tray icon based on connection status
@@ -148,13 +151,15 @@ func SetupTray(mw *walk.MainWindow) error {
 	moreMenu.Actions().Add(openLogsAction)
 
 	// Create Check for Updates action
-	updateAction := walk.NewAction()
-	updateAction.SetText("Check for Updates")
-	updateAction.Triggered().Attach(func() {
+	checkUpdateAction := walk.NewAction()
+	checkUpdateAction.SetText("Check for Updates")
+	checkUpdateAction.Triggered().Attach(func() {
 		go func() {
-			logger.Info("Checking for updates...")
+			logger.Info("Checking for updates via manager...")
 			logger.Info("Current version: %s", version.Number)
-			update, err := updater.CheckForUpdate()
+
+			// Check update state via manager IPC
+			updateState, err := managers.IPCClientUpdateState()
 			if err != nil {
 				logger.Error("Update check failed: %v", err)
 				walk.App().Synchronize(func() {
@@ -169,7 +174,23 @@ func SetupTray(mw *walk.MainWindow) error {
 				})
 				return
 			}
-			if update == nil {
+
+			if updateState == managers.UpdateStateFoundUpdate {
+				logger.Info("Update available")
+				// Trigger the update
+				triggerUpdate(mw)
+			} else if updateState == managers.UpdateStateUpdatesDisabledUnofficialBuild {
+				walk.App().Synchronize(func() {
+					td := walk.NewTaskDialog()
+					_, _ = td.Show(walk.TaskDialogOpts{
+						Owner:         mw,
+						Title:         "Updates Disabled",
+						Content:       "Updates are disabled for unofficial builds.",
+						IconSystem:    walk.TaskDialogSystemIconInformation,
+						CommonButtons: win.TDCBF_OK_BUTTON,
+					})
+				})
+			} else {
 				logger.Info("No update available")
 				walk.App().Synchronize(func() {
 					td := walk.NewTaskDialog()
@@ -181,86 +202,10 @@ func SetupTray(mw *walk.MainWindow) error {
 						CommonButtons: win.TDCBF_OK_BUTTON,
 					})
 				})
-				return
-			}
-
-			logger.Info("Update found: %s", update.Name())
-			userAcceptedChan := make(chan bool, 1)
-			walk.App().Synchronize(func() {
-				td := walk.NewTaskDialog()
-				opts := walk.TaskDialogOpts{
-					Owner:         mw,
-					Title:         "Update Available",
-					Content:       fmt.Sprintf("A new version is available: %s\n\nWould you like to download and install it now?", update.Name()),
-					IconSystem:    walk.TaskDialogSystemIconInformation,
-					CommonButtons: win.TDCBF_YES_BUTTON | win.TDCBF_NO_BUTTON,
-					DefaultButton: walk.TaskDialogDefaultButtonYes,
-				}
-				opts.CommonButtonClicked(win.TDCBF_YES_BUTTON).Attach(func() bool {
-					userAcceptedChan <- true
-					return true
-				})
-				opts.CommonButtonClicked(win.TDCBF_NO_BUTTON).Attach(func() bool {
-					userAcceptedChan <- false
-					return true
-				})
-				_, _ = td.Show(opts)
-			})
-
-			userAccepted := <-userAcceptedChan
-			if !userAccepted {
-				logger.Info("User declined update")
-				return
-			}
-
-			// Start download and installation
-			logger.Info("Starting update download...")
-			progress := updater.DownloadVerifyAndExecute(0) // 0 = use SYSTEM token
-
-			for dp := range progress {
-				if dp.Error != nil {
-					logger.Error("Update error: %v", dp.Error)
-					walk.App().Synchronize(func() {
-						td := walk.NewTaskDialog()
-						_, _ = td.Show(walk.TaskDialogOpts{
-							Owner:         mw,
-							Title:         "Update Failed",
-							Content:       fmt.Sprintf("Update failed: %v", dp.Error),
-							IconSystem:    walk.TaskDialogSystemIconError,
-							CommonButtons: win.TDCBF_OK_BUTTON,
-						})
-					})
-					return
-				}
-
-				if len(dp.Activity) > 0 {
-					logger.Info("Update: %s", dp.Activity)
-				}
-
-				if dp.BytesTotal > 0 {
-					percent := float64(dp.BytesDownloaded) / float64(dp.BytesTotal) * 100
-					logger.Info("Download progress: %.1f%% (%d/%d bytes)", percent, dp.BytesDownloaded, dp.BytesTotal)
-				}
-
-				if dp.Complete {
-					logger.Info("Update complete! The application will restart.")
-					walk.App().Synchronize(func() {
-						td := walk.NewTaskDialog()
-						_, _ = td.Show(walk.TaskDialogOpts{
-							Owner:         mw,
-							Title:         "Update Complete",
-							Content:       "The update has been installed successfully. The application will now restart.",
-							IconSystem:    walk.TaskDialogSystemIconInformation,
-							CommonButtons: win.TDCBF_OK_BUTTON,
-						})
-					})
-					// The MSI installer will handle the restart
-					return
-				}
 			}
 		}()
 	})
-	moreMenu.Actions().Add(updateAction)
+	moreMenu.Actions().Add(checkUpdateAction)
 
 	// Add version info at the bottom, grayed out
 	versionAction := walk.NewAction()
@@ -275,6 +220,19 @@ func SetupTray(mw *walk.MainWindow) error {
 	quitAction = walk.NewAction()
 	quitAction.SetText("Quit")
 	quitAction.Triggered().Attach(func() {
+		// Try to quit the manager service (stops tunnels and quits manager)
+		// This only works if we're connected via IPC
+		go func() {
+			alreadyQuit, err := managers.IPCClientQuit(true) // true = stop tunnels on quit
+			if err != nil {
+				logger.Error("Failed to quit manager service: %v", err)
+			} else if alreadyQuit {
+				logger.Info("Manager service already quitting")
+			} else {
+				logger.Info("Manager service quit requested")
+			}
+		}()
+		// Exit the UI - if connected via IPC, manager will also stop
 		walk.App().Exit(0)
 	})
 
@@ -321,7 +279,145 @@ func SetupTray(mw *walk.MainWindow) error {
 
 	ni.SetVisible(true)
 
+	// Register for update notifications from manager (if connected via IPC)
+	// These callbacks will be called when the manager finds updates or makes progress
+	updateFoundCb = managers.IPCClientRegisterUpdateFound(func(updateState managers.UpdateState) {
+		if updateState == managers.UpdateStateFoundUpdate {
+			updateMutex.Lock()
+			hasUpdate = true
+			updateMutex.Unlock()
+			updateMenuWithAvailableUpdate()
+		} else {
+			updateMutex.Lock()
+			hasUpdate = false
+			updateMutex.Unlock()
+			updateMenuWithAvailableUpdate()
+		}
+	})
+
+	// Register for manager stopping notification
+	managerStoppingCb = managers.IPCClientRegisterManagerStopping(func() {
+		logger.Info("Manager service is stopping, exiting UI")
+		walk.App().Synchronize(func() {
+			walk.App().Exit(0)
+		})
+	})
+
+	updateProgressCb = managers.IPCClientRegisterUpdateProgress(func(dp updater.DownloadProgress) {
+		if dp.Error != nil {
+			logger.Error("Update error: %v", dp.Error)
+			walk.App().Synchronize(func() {
+				td := walk.NewTaskDialog()
+				_, _ = td.Show(walk.TaskDialogOpts{
+					Owner:         mw,
+					Title:         "Update Failed",
+					Content:       fmt.Sprintf("Update failed: %v", dp.Error),
+					IconSystem:    walk.TaskDialogSystemIconError,
+					CommonButtons: win.TDCBF_OK_BUTTON,
+				})
+			})
+			return
+		}
+
+		if len(dp.Activity) > 0 {
+			logger.Info("Update: %s", dp.Activity)
+		}
+
+		if dp.BytesTotal > 0 {
+			percent := float64(dp.BytesDownloaded) / float64(dp.BytesTotal) * 100
+			logger.Info("Download progress: %.1f%% (%d/%d bytes)", percent, dp.BytesDownloaded, dp.BytesTotal)
+		}
+
+		if dp.Complete {
+			logger.Info("Update complete! The application will restart.")
+			walk.App().Synchronize(func() {
+				td := walk.NewTaskDialog()
+				_, _ = td.Show(walk.TaskDialogOpts{
+					Owner:         mw,
+					Title:         "Update Complete",
+					Content:       "The update has been installed successfully. The application will now restart.",
+					IconSystem:    walk.TaskDialogSystemIconInformation,
+					CommonButtons: win.TDCBF_OK_BUTTON,
+				})
+			})
+			// Clear the update after installation starts
+			updateMutex.Lock()
+			hasUpdate = false
+			updateMutex.Unlock()
+			updateMenuWithAvailableUpdate()
+			// The MSI installer will handle the restart
+		}
+	})
+
+	// Check initial update state
+	go func() {
+		updateState, err := managers.IPCClientUpdateState()
+		if err == nil && updateState == managers.UpdateStateFoundUpdate {
+			updateMutex.Lock()
+			hasUpdate = true
+			updateMutex.Unlock()
+			updateMenuWithAvailableUpdate()
+		}
+	}()
+
 	return nil
+}
+
+// triggerUpdate asks the user for confirmation and then triggers the update via manager
+func triggerUpdate(mw *walk.MainWindow) {
+	userAcceptedChan := make(chan bool, 1)
+
+	// Show dialog on UI thread - Show() blocks until dialog is closed
+	walk.App().Synchronize(func() {
+		td := walk.NewTaskDialog()
+		opts := walk.TaskDialogOpts{
+			Owner:         mw,
+			Title:         "Update Available",
+			Content:       "A new version is available.\n\nWould you like to download and install it now?",
+			IconSystem:    walk.TaskDialogSystemIconInformation,
+			CommonButtons: win.TDCBF_YES_BUTTON | win.TDCBF_NO_BUTTON,
+			DefaultButton: walk.TaskDialogDefaultButtonYes,
+		}
+		opts.CommonButtonClicked(win.TDCBF_YES_BUTTON).Attach(func() bool {
+			select {
+			case userAcceptedChan <- true:
+			default:
+			}
+			return false // Return false to allow dialog to close normally
+		})
+		opts.CommonButtonClicked(win.TDCBF_NO_BUTTON).Attach(func() bool {
+			select {
+			case userAcceptedChan <- false:
+			default:
+			}
+			return false // Return false to allow dialog to close normally
+		})
+		td.Show(opts)
+	})
+
+	// Wait for user response
+	userAccepted := <-userAcceptedChan
+	if !userAccepted {
+		logger.Info("User declined update")
+		return
+	}
+
+	// Trigger update via manager IPC
+	logger.Info("Starting update download via manager...")
+	err := managers.IPCClientUpdate()
+	if err != nil {
+		logger.Error("Failed to trigger update: %v", err)
+		walk.App().Synchronize(func() {
+			td := walk.NewTaskDialog()
+			td.Show(walk.TaskDialogOpts{
+				Owner:         mw,
+				Title:         "Update Failed",
+				Content:       fmt.Sprintf("Failed to start update: %v", err),
+				IconSystem:    walk.TaskDialogSystemIconError,
+				CommonButtons: win.TDCBF_OK_BUTTON,
+			})
+		})
+	}
 }
 
 // updateMenuWithAvailableUpdate adds or removes the "Update Available" menu item
@@ -339,7 +435,7 @@ func updateMenuWithAvailableUpdate() {
 	}
 
 	updateMutex.RLock()
-	hasUpdate := availableUpdate != nil
+	hasUpdateLocal := hasUpdate
 	updateMutex.RUnlock()
 
 	// Use defer/recover to catch any panics from Synchronize
@@ -370,101 +466,14 @@ func updateMenuWithAvailableUpdate() {
 			}
 		}
 
-		if hasUpdate {
+		if hasUpdateLocal {
 			// Create update menu item if it doesn't exist
 			if updateAction == nil {
 				updateAction = walk.NewAction()
 				updateAction.SetText("Update available")
 				updateAction.Triggered().Attach(func() {
-					// Run in goroutine to avoid blocking the UI thread
-					go func() {
-						updateMutex.RLock()
-						update := availableUpdate
-						updateMutex.RUnlock()
-						if update == nil {
-							return
-						}
-
-						// Show confirmation dialog
-						userAcceptedChan := make(chan bool, 1)
-						walk.App().Synchronize(func() {
-							td := walk.NewTaskDialog()
-							opts := walk.TaskDialogOpts{
-								Owner:         mainWindow,
-								Title:         "Update Available",
-								Content:       fmt.Sprintf("A new version is available: %s\n\nWould you like to download and install it now?", update.Name()),
-								IconSystem:    walk.TaskDialogSystemIconInformation,
-								CommonButtons: win.TDCBF_YES_BUTTON | win.TDCBF_NO_BUTTON,
-								DefaultButton: walk.TaskDialogDefaultButtonYes,
-							}
-							opts.CommonButtonClicked(win.TDCBF_YES_BUTTON).Attach(func() bool {
-								userAcceptedChan <- true
-								return true
-							})
-							opts.CommonButtonClicked(win.TDCBF_NO_BUTTON).Attach(func() bool {
-								userAcceptedChan <- false
-								return true
-							})
-							_, _ = td.Show(opts)
-						})
-
-						userAccepted := <-userAcceptedChan
-						if !userAccepted {
-							logger.Info("User declined update")
-							return
-						}
-
-						// Start download and installation
-						logger.Info("Starting update download...")
-						progress := updater.DownloadVerifyAndExecute(0) // 0 = use SYSTEM token
-
-						for dp := range progress {
-							if dp.Error != nil {
-								logger.Error("Update error: %v", dp.Error)
-								walk.App().Synchronize(func() {
-									td := walk.NewTaskDialog()
-									_, _ = td.Show(walk.TaskDialogOpts{
-										Owner:         mainWindow,
-										Title:         "Update Failed",
-										Content:       fmt.Sprintf("Update failed: %v", dp.Error),
-										IconSystem:    walk.TaskDialogSystemIconError,
-										CommonButtons: win.TDCBF_OK_BUTTON,
-									})
-								})
-								return
-							}
-
-							if len(dp.Activity) > 0 {
-								logger.Info("Update: %s", dp.Activity)
-							}
-
-							if dp.BytesTotal > 0 {
-								percent := float64(dp.BytesDownloaded) / float64(dp.BytesTotal) * 100
-								logger.Info("Download progress: %.1f%% (%d/%d bytes)", percent, dp.BytesDownloaded, dp.BytesTotal)
-							}
-
-							if dp.Complete {
-								logger.Info("Update complete! The application will restart.")
-								walk.App().Synchronize(func() {
-									td := walk.NewTaskDialog()
-									_, _ = td.Show(walk.TaskDialogOpts{
-										Owner:         mainWindow,
-										Title:         "Update Complete",
-										Content:       "The update has been installed successfully. The application will now restart.",
-										IconSystem:    walk.TaskDialogSystemIconInformation,
-										CommonButtons: win.TDCBF_OK_BUTTON,
-									})
-								})
-								// Clear the update after installation starts
-								updateMutex.Lock()
-								availableUpdate = nil
-								updateMutex.Unlock()
-								updateMenuWithAvailableUpdate()
-								// The MSI installer will handle the restart
-								return
-							}
-						}
-					}()
+					// Run in goroutine to avoid blocking the menu action handler
+					go triggerUpdate(mainWindow)
 				})
 			} else {
 				// Update the text if action already exists (keep it simple)
@@ -497,26 +506,5 @@ func updateMenuWithAvailableUpdate() {
 			// Note: We don't set updateAction to nil here because we want to keep
 			// the action object for potential reuse, just remove it from the menu
 		}
-	})
-}
-
-// StartBackgroundUpdateChecker starts a background update checker that periodically
-// checks for updates and updates the menu when an update is found.
-func StartBackgroundUpdateChecker(mw *walk.MainWindow, interval time.Duration) {
-	updater.StartBackgroundUpdateChecker(interval, func(update *updater.UpdateFound) {
-		// Use defer/recover to catch any panics
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Error("Panic in update callback: %v", r)
-			}
-		}()
-
-		// Store the update
-		updateMutex.Lock()
-		availableUpdate = update
-		updateMutex.Unlock()
-
-		// Update the menu to show the update item
-		updateMenuWithAvailableUpdate()
 	})
 }
