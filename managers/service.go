@@ -281,22 +281,20 @@ loop:
 			case svc.Interrogate:
 				changes <- c.CurrentStatus
 			case svc.SessionChange:
-				if c.EventType != windows.WTS_SESSION_LOGON && c.EventType != windows.WTS_SESSION_LOGOFF {
-					continue
-				}
 				sessionNotification := (*windows.WTSSESSION_NOTIFICATION)(unsafe.Pointer(c.EventData))
 				if uintptr(sessionNotification.Size) != unsafe.Sizeof(*sessionNotification) {
 					logger.Error("Unexpected size of WTSSESSION_NOTIFICATION: %d", sessionNotification.Size)
 					continue
 				}
-				if c.EventType == windows.WTS_SESSION_LOGOFF {
+				switch c.EventType {
+				case windows.WTS_SESSION_LOGOFF:
 					procsLock.Lock()
 					delete(aliveSessions, sessionNotification.SessionID)
 					if proc, ok := procs[sessionNotification.SessionID]; ok {
 						proc.Kill()
 					}
 					procsLock.Unlock()
-				} else if c.EventType == windows.WTS_SESSION_LOGON {
+				case windows.WTS_SESSION_LOGON:
 					procsLock.Lock()
 					if alive := aliveSessions[sessionNotification.SessionID]; !alive {
 						aliveSessions[sessionNotification.SessionID] = true
@@ -305,6 +303,9 @@ loop:
 						}
 					}
 					procsLock.Unlock()
+				default:
+					// Ignore other session change events
+					continue
 				}
 
 			default:

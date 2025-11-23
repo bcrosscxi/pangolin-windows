@@ -8,8 +8,12 @@ import (
 	"os"
 	"sync"
 
+	"github.com/fosrl/windows/tunnel"
 	"github.com/fosrl/windows/updater"
 )
+
+// TunnelConfig is exported for use in UI
+type TunnelConfig = tunnel.Config
 
 type NotificationType int
 
@@ -17,6 +21,7 @@ const (
 	ManagerStoppingNotificationType NotificationType = iota
 	UpdateFoundNotificationType
 	UpdateProgressNotificationType
+	TunnelStateChangeNotificationType
 )
 
 type MethodType int
@@ -25,6 +30,8 @@ const (
 	QuitMethodType MethodType = iota
 	UpdateStateMethodType
 	UpdateMethodType
+	StartTunnelMethodType
+	StopTunnelMethodType
 )
 
 var (
@@ -50,6 +57,12 @@ type UpdateProgressCallback struct {
 }
 
 var updateProgressCallbacks = make(map[*UpdateProgressCallback]bool)
+
+type TunnelStateChangeCallback struct {
+	cb func(state TunnelState)
+}
+
+var tunnelStateChangeCallbacks = make(map[*TunnelStateChangeCallback]bool)
 
 func InitializeIPCClient(reader, writer, events *os.File) {
 	rpcDecoder = gob.NewDecoder(reader)
@@ -104,6 +117,15 @@ func InitializeIPCClient(reader, writer, events *os.File) {
 				}
 				for cb := range updateProgressCallbacks {
 					cb.cb(dp)
+				}
+			case TunnelStateChangeNotificationType:
+				var state TunnelState
+				err = decoder.Decode(&state)
+				if err != nil {
+					continue
+				}
+				for cb := range tunnelStateChangeCallbacks {
+					cb.cb(state)
 				}
 			}
 		}
@@ -192,4 +214,42 @@ func IPCClientRegisterUpdateProgress(cb func(dp updater.DownloadProgress)) *Upda
 
 func (cb *UpdateProgressCallback) Unregister() {
 	delete(updateProgressCallbacks, cb)
+}
+
+func IPCClientStartTunnel(config TunnelConfig) error {
+	rpcMutex.Lock()
+	defer rpcMutex.Unlock()
+
+	err := rpcEncoder.Encode(StartTunnelMethodType)
+	if err != nil {
+		return err
+	}
+	err = rpcEncoder.Encode(config)
+	if err != nil {
+		return err
+	}
+	err = rpcDecodeError()
+	return err
+}
+
+func IPCClientStopTunnel() error {
+	rpcMutex.Lock()
+	defer rpcMutex.Unlock()
+
+	err := rpcEncoder.Encode(StopTunnelMethodType)
+	if err != nil {
+		return err
+	}
+	err = rpcDecodeError()
+	return err
+}
+
+func IPCClientRegisterTunnelStateChange(cb func(state TunnelState)) *TunnelStateChangeCallback {
+	s := &TunnelStateChangeCallback{cb}
+	tunnelStateChangeCallbacks[s] = true
+	return s
+}
+
+func (cb *TunnelStateChangeCallback) Unregister() {
+	delete(tunnelStateChangeCallbacks, cb)
 }

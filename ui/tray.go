@@ -21,20 +21,23 @@ import (
 )
 
 var (
-	trayIcon          *walk.NotifyIcon
-	contextMenu       *walk.Menu
-	mainWindow        *walk.MainWindow
-	hasUpdate         bool
-	updateMutex       sync.RWMutex
-	updateAction      *walk.Action // Action for "Update Available" menu item
-	labelAction       *walk.Action
-	loginAction       *walk.Action
-	connectAction     *walk.Action
-	moreAction        *walk.Action
-	quitAction        *walk.Action
-	updateFoundCb     *managers.UpdateFoundCallback
-	updateProgressCb  *managers.UpdateProgressCallback
-	managerStoppingCb *managers.ManagerStoppingCallback
+	trayIcon            *walk.NotifyIcon
+	contextMenu         *walk.Menu
+	mainWindow          *walk.MainWindow
+	hasUpdate           bool
+	updateMutex         sync.RWMutex
+	updateAction        *walk.Action // Action for "Update Available" menu item
+	labelAction         *walk.Action
+	loginAction         *walk.Action
+	connectAction       *walk.Action
+	moreAction          *walk.Action
+	quitAction          *walk.Action
+	updateFoundCb       *managers.UpdateFoundCallback
+	updateProgressCb    *managers.UpdateProgressCallback
+	managerStoppingCb   *managers.ManagerStoppingCallback
+	tunnelStateChangeCb *managers.TunnelStateChangeCallback
+	isConnected         bool
+	connectMutex        sync.RWMutex
 )
 
 // setTrayIcon updates the tray icon based on connection status
@@ -101,21 +104,43 @@ func SetupTray(mw *walk.MainWindow) error {
 
 	// Create Connect action (toggle button with checkmark)
 	connectAction = walk.NewAction()
-	var isConnected bool
 	connectAction.SetText("Connect")
 	connectAction.SetChecked(false) // Initially unchecked
 	connectAction.Triggered().Attach(func() {
-		isConnected = !isConnected
-		connectAction.SetChecked(isConnected)
+		go func() {
+			connectMutex.RLock()
+			currentState := isConnected
+			connectMutex.RUnlock()
 
-		// Update icon based on connection status
-		setTrayIcon(isConnected)
-
-		if isConnected {
-			logger.Info("connecting...")
-		} else {
-			logger.Info("disconnecting...")
-		}
+			if currentState {
+				// Disconnect
+				logger.Info("Disconnecting...")
+				err := managers.IPCClientStopTunnel()
+				if err != nil {
+					logger.Error("Failed to stop tunnel: %v", err)
+					walk.App().Synchronize(func() {
+						connectAction.SetChecked(true) // Revert on error
+					})
+				}
+			} else {
+				// Connect - create typed config struct
+				config := managers.TunnelConfig{
+					Name:      "pangolin-tunnel",
+					Endpoint:  "example.pangolin.net:51820",
+					DNS:       "8.8.8.8,1.1.1.1",
+					Address:   "10.0.0.2/24",
+					UserToken: "abc123",
+				}
+				logger.Info("Connecting with config: Name=%s, Endpoint=%s", config.Name, config.Endpoint)
+				err := managers.IPCClientStartTunnel(config)
+				if err != nil {
+					logger.Error("Failed to start tunnel: %v", err)
+					walk.App().Synchronize(func() {
+						connectAction.SetChecked(false) // Revert on error
+					})
+				}
+			}
+		}()
 	})
 
 	// Create More submenu with Documentation and Open Logs
@@ -175,11 +200,12 @@ func SetupTray(mw *walk.MainWindow) error {
 				return
 			}
 
-			if updateState == managers.UpdateStateFoundUpdate {
+			switch updateState {
+			case managers.UpdateStateFoundUpdate:
 				logger.Info("Update available")
 				// Trigger the update
 				triggerUpdate(mw)
-			} else if updateState == managers.UpdateStateUpdatesDisabledUnofficialBuild {
+			case managers.UpdateStateUpdatesDisabledUnofficialBuild:
 				walk.App().Synchronize(func() {
 					td := walk.NewTaskDialog()
 					_, _ = td.Show(walk.TaskDialogOpts{
@@ -190,7 +216,7 @@ func SetupTray(mw *walk.MainWindow) error {
 						CommonButtons: win.TDCBF_OK_BUTTON,
 					})
 				})
-			} else {
+			default:
 				logger.Info("No update available")
 				walk.App().Synchronize(func() {
 					td := walk.NewTaskDialog()
@@ -359,6 +385,33 @@ func SetupTray(mw *walk.MainWindow) error {
 			updateMenuWithAvailableUpdate()
 		}
 	}()
+
+	// Register for tunnel state change notifications
+	tunnelStateChangeCb = managers.IPCClientRegisterTunnelStateChange(func(state managers.TunnelState) {
+		logger.Info("Tunnel state changed: %s", state.String())
+		walk.App().Synchronize(func() {
+			switch state {
+			case managers.TunnelStateRunning:
+				connectMutex.Lock()
+				isConnected = true
+				connectMutex.Unlock()
+				connectAction.SetChecked(true)
+				setTrayIcon(true)
+				connectAction.SetText("Disconnect")
+			case managers.TunnelStateStopped:
+				connectMutex.Lock()
+				isConnected = false
+				connectMutex.Unlock()
+				connectAction.SetChecked(false)
+				setTrayIcon(false)
+				connectAction.SetText("Connect")
+			case managers.TunnelStateStarting:
+				connectAction.SetText("Connecting...")
+			case managers.TunnelStateStopping:
+				connectAction.SetText("Disconnecting...")
+			}
+		})
+	})
 
 	return nil
 }

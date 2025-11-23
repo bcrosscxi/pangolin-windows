@@ -51,6 +51,25 @@ func main() {
 		return
 	}
 
+	// Check if we're being run as a tunnel service
+	if len(os.Args) >= 3 && os.Args[1] == "/tunnelservice" {
+		// Run as tunnel service
+		configPath := os.Args[2]
+		logger.Info("Starting as tunnel service with config: %s", configPath)
+
+		// Read config from file
+		configJSON, err := os.ReadFile(configPath)
+		if err != nil {
+			logger.Fatal("Failed to read tunnel config: %v", err)
+		}
+
+		// Run the tunnel service
+		if err := managers.RunTunnelService(string(configJSON)); err != nil {
+			logger.Fatal("Tunnel service failed: %v", err)
+		}
+		return
+	}
+
 	// Handle /installmanagerservice flag (called after elevation)
 	if len(os.Args) >= 2 && os.Args[1] == "/installmanagerservice" {
 		err := managers.InstallManager()

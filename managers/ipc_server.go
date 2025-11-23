@@ -14,14 +14,22 @@ import (
 	"github.com/fosrl/newt/logger"
 	"golang.org/x/sys/windows"
 
+	"github.com/fosrl/windows/tunnel"
 	"github.com/fosrl/windows/updater"
 )
+
+// RunTunnelService is exported so main.go can call it
+func RunTunnelService(configJSON string) error {
+	return tunnel.RunTunnelService(configJSON)
+}
 
 var (
 	managerServices     = make(map[*ManagerService]bool)
 	managerServicesLock sync.RWMutex
 	haveQuit            uint32
 	quitManagersChan    = make(chan struct{}, 1)
+	activeTunnels       = make(map[string]bool) // Track active tunnel names
+	activeTunnelsLock   sync.RWMutex
 )
 
 type ManagerService struct {
@@ -47,8 +55,23 @@ func (s *ManagerService) Quit(stopTunnelsOnQuit bool) (alreadyQuit bool, err err
 	managerServicesLock.Unlock()
 
 	if stopTunnelsOnQuit {
-		// Tunnel management not yet implemented
-		logger.Info("Quit requested with stopTunnelsOnQuit=true, but tunnel management not yet implemented")
+		// Stop all active tunnels before quitting
+		logger.Info("Quit requested with stopTunnelsOnQuit=true, stopping all tunnels")
+		activeTunnelsLock.Lock()
+		tunnelNames := make([]string, 0, len(activeTunnels))
+		for name := range activeTunnels {
+			tunnelNames = append(tunnelNames, name)
+		}
+		activeTunnelsLock.Unlock()
+
+		for _, name := range tunnelNames {
+			logger.Info("Stopping tunnel: %s", name)
+			if err := UninstallTunnel(name); err != nil {
+				logger.Error("Failed to stop tunnel %s: %v", name, err)
+				// Continue stopping other tunnels even if one fails
+			}
+		}
+		logger.Info("All tunnels stopped")
 	}
 
 	quitManagersChan <- struct{}{}
@@ -74,6 +97,62 @@ func (s *ManagerService) Update() {
 			}
 		}
 	}()
+}
+
+func (s *ManagerService) StartTunnel(config tunnel.Config) error {
+	// Set up callback to notify on state changes
+	tunnel.SetStateChangeCallback(func(state TunnelState) {
+		IPCServerNotifyTunnelStateChange(state)
+	})
+
+	// Set up callbacks for tunnel service to call install/uninstall
+	tunnel.SetInstallTunnelCallback(InstallTunnel)
+	tunnel.SetUninstallTunnelCallback(func(name string) error {
+		return UninstallTunnel(name)
+	})
+
+	err := tunnel.StartTunnel(config)
+	if err != nil {
+		return err
+	}
+	// Track this tunnel as active
+	activeTunnelsLock.Lock()
+	activeTunnels[config.Name] = true
+	activeTunnelsLock.Unlock()
+	// Notify UI of initial state change (starting)
+	state := tunnel.GetState()
+	IPCServerNotifyTunnelStateChange(state)
+	return nil
+}
+
+func (s *ManagerService) StopTunnel() error {
+	// Set up callback to notify on state changes
+	tunnel.SetStateChangeCallback(func(state TunnelState) {
+		IPCServerNotifyTunnelStateChange(state)
+	})
+
+	// Set up callbacks for tunnel service to call install/uninstall
+	tunnel.SetInstallTunnelCallback(InstallTunnel)
+	tunnel.SetUninstallTunnelCallback(func(name string) error {
+		return UninstallTunnel(name)
+	})
+
+	err := tunnel.StopTunnel()
+	if err != nil {
+		return err
+	}
+	// Remove tunnel from active list
+	// Get the tunnel name from the tunnel package
+	tunnelName := tunnel.GetTunnelName()
+	if tunnelName != "" {
+		activeTunnelsLock.Lock()
+		delete(activeTunnels, tunnelName)
+		activeTunnelsLock.Unlock()
+	}
+	// Notify UI of initial state change (stopping)
+	state := tunnel.GetState()
+	IPCServerNotifyTunnelStateChange(state)
+	return nil
 }
 
 func (s *ManagerService) ServeConn(reader io.Reader, writer io.Writer) {
@@ -109,6 +188,23 @@ func (s *ManagerService) ServeConn(reader io.Reader, writer io.Writer) {
 			}
 		case UpdateMethodType:
 			s.Update()
+		case StartTunnelMethodType:
+			var config tunnel.Config
+			err := decoder.Decode(&config)
+			if err != nil {
+				return
+			}
+			retErr := s.StartTunnel(config)
+			err = encoder.Encode(errToString(retErr))
+			if err != nil {
+				return
+			}
+		case StopTunnelMethodType:
+			retErr := s.StopTunnel()
+			err = encoder.Encode(errToString(retErr))
+			if err != nil {
+				return
+			}
 		default:
 			return
 		}
@@ -188,4 +284,8 @@ func IPCServerNotifyUpdateProgress(dp updater.DownloadProgress) {
 func IPCServerNotifyManagerStopping() {
 	notifyAll(ManagerStoppingNotificationType, false)
 	time.Sleep(time.Millisecond * 200)
+}
+
+func IPCServerNotifyTunnelStateChange(state TunnelState) {
+	notifyAll(TunnelStateChangeNotificationType, false, state)
 }
