@@ -1,0 +1,661 @@
+//go:build windows
+
+package auth
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/fosrl/windows/api"
+	"github.com/fosrl/windows/config"
+	"github.com/fosrl/windows/secrets"
+
+	"github.com/fosrl/newt/logger"
+)
+
+// AuthError represents authentication-specific errors
+type AuthError struct {
+	Type AuthErrorType
+}
+
+type AuthErrorType int
+
+const (
+	AuthErrorTwoFactorRequired AuthErrorType = iota
+	AuthErrorEmailVerificationRequired
+	AuthErrorDeviceCodeExpired
+	AuthErrorInvalidToken
+)
+
+func (e *AuthError) Error() string {
+	switch e.Type {
+	case AuthErrorTwoFactorRequired:
+		return "Two-factor authentication code required"
+	case AuthErrorEmailVerificationRequired:
+		return "Email verification required"
+	case AuthErrorDeviceCodeExpired:
+		return "Device code expired. Please try again."
+	case AuthErrorInvalidToken:
+		return "Invalid session token"
+	default:
+		return "Authentication error"
+	}
+}
+
+// AuthManager manages authentication state and operations
+type AuthManager struct {
+	apiClient     *api.APIClient
+	configManager *config.ConfigManager
+	secretManager *secrets.SecretManager
+
+	// State
+	mu                 sync.RWMutex
+	isAuthenticated    bool
+	currentUser        *api.User
+	currentOrg         *api.Org
+	organizations      []api.Org
+	isLoading          bool
+	isInitializing     bool
+	errorMessage       *string
+	deviceAuthCode     *string
+	deviceAuthLoginURL *string
+}
+
+// NewAuthManager creates a new AuthManager instance
+func NewAuthManager(apiClient *api.APIClient, configManager *config.ConfigManager, secretManager *secrets.SecretManager) *AuthManager {
+	return &AuthManager{
+		apiClient:      apiClient,
+		configManager:  configManager,
+		secretManager:  secretManager,
+		isInitializing: true,
+	}
+}
+
+// Initialize loads session token from secrets and verifies authentication
+func (am *AuthManager) Initialize() error {
+	am.mu.Lock()
+	am.isInitializing = true
+	am.mu.Unlock()
+
+	defer func() {
+		am.mu.Lock()
+		am.isInitializing = false
+		am.mu.Unlock()
+	}()
+
+	// Load session token from Keychain
+	token, found := am.secretManager.GetSecret("session-token")
+	if found && token != "" {
+		am.apiClient.UpdateSessionToken(token)
+
+		// Always fetch the latest user info to verify the user exists and update stored info
+		user, err := am.apiClient.GetUser()
+		if err != nil {
+			// Token is invalid or user doesn't exist, clear it
+			am.mu.Lock()
+			am.isAuthenticated = false
+			am.mu.Unlock()
+			return nil // Not an error, just not authenticated
+		}
+
+		// Update stored config with latest user info
+		return am.handleSuccessfulAuth(user, token)
+	}
+
+	am.mu.Lock()
+	am.isAuthenticated = false
+	am.mu.Unlock()
+	return nil
+}
+
+// LoginWithCredentials authenticates with email and password
+func (am *AuthManager) LoginWithCredentials(email, password string, code *string) error {
+	am.mu.Lock()
+	am.isLoading = true
+	am.errorMessage = nil
+	am.mu.Unlock()
+
+	defer func() {
+		am.mu.Lock()
+		am.isLoading = false
+		am.mu.Unlock()
+	}()
+
+	loginResponse, token, err := am.apiClient.Login(email, password, code)
+	if err != nil {
+		am.mu.Lock()
+		if apiErr, ok := err.(*api.APIError); ok {
+			msg := apiErr.Error()
+			am.errorMessage = &msg
+		} else {
+			msg := err.Error()
+			am.errorMessage = &msg
+		}
+		am.mu.Unlock()
+		return err
+	}
+
+	// Check if 2FA code is required
+	if loginResponse.CodeRequested != nil && *loginResponse.CodeRequested {
+		return &AuthError{Type: AuthErrorTwoFactorRequired}
+	}
+
+	// Check if email verification is required
+	if loginResponse.EmailVerificationRequired != nil && *loginResponse.EmailVerificationRequired {
+		return &AuthError{Type: AuthErrorEmailVerificationRequired}
+	}
+
+	// Save token
+	am.secretManager.SaveSecret("session-token", token)
+	am.apiClient.UpdateSessionToken(token)
+
+	// Get user info
+	user, err := am.apiClient.GetUser()
+	if err != nil {
+		am.mu.Lock()
+		msg := err.Error()
+		am.errorMessage = &msg
+		am.mu.Unlock()
+		return err
+	}
+
+	return am.handleSuccessfulAuth(user, token)
+}
+
+// LoginWithDeviceAuth authenticates using device authentication flow
+func (am *AuthManager) LoginWithDeviceAuth() error {
+	am.mu.Lock()
+	am.isLoading = true
+	am.errorMessage = nil
+	am.mu.Unlock()
+
+	defer func() {
+		am.mu.Lock()
+		am.isLoading = false
+		am.mu.Unlock()
+	}()
+
+	// Get device name
+	deviceName, err := os.Hostname()
+	if err != nil {
+		deviceName = "Windows Device"
+	}
+
+	// Start device auth
+	startResponse, err := am.apiClient.StartDeviceAuth("Pangolin Windows Client", &deviceName)
+	if err != nil {
+		am.mu.Lock()
+		if apiErr, ok := err.(*api.APIError); ok {
+			msg := apiErr.Error()
+			am.errorMessage = &msg
+		} else {
+			msg := err.Error()
+			am.errorMessage = &msg
+		}
+		am.mu.Unlock()
+		return err
+	}
+
+	// Store code and URL for UI display
+	code := startResponse.Code
+	loginURL := fmt.Sprintf("%s/auth/login/device", am.apiClient.CurrentBaseURL())
+
+	am.mu.Lock()
+	am.deviceAuthCode = &code
+	am.deviceAuthLoginURL = &loginURL
+	am.mu.Unlock()
+
+	// Poll for verification
+	expiresAt := time.Unix(startResponse.ExpiresAt/1000, 0)
+	verified := false
+	var sessionToken *string
+
+	for !verified && time.Now().Before(expiresAt) {
+		time.Sleep(3 * time.Second)
+
+		pollResponse, token, err := am.apiClient.PollDeviceAuth(code)
+		if err != nil {
+			// Continue polling on error
+			continue
+		}
+
+		if pollResponse.Verified {
+			verified = true
+			if token != nil {
+				sessionToken = token
+			}
+		} else if pollResponse.Message != nil {
+			message := *pollResponse.Message
+			if contains(message, "expired") || contains(message, "not found") {
+				am.mu.Lock()
+				am.deviceAuthCode = nil
+				am.deviceAuthLoginURL = nil
+				am.mu.Unlock()
+				return &AuthError{Type: AuthErrorDeviceCodeExpired}
+			}
+		}
+	}
+
+	if !verified {
+		am.mu.Lock()
+		am.deviceAuthCode = nil
+		am.deviceAuthLoginURL = nil
+		am.mu.Unlock()
+		return &AuthError{Type: AuthErrorDeviceCodeExpired}
+	}
+
+	if sessionToken == nil {
+		return &AuthError{Type: AuthErrorInvalidToken}
+	}
+
+	// Save token
+	am.secretManager.SaveSecret("session-token", *sessionToken)
+	am.apiClient.UpdateSessionToken(*sessionToken)
+
+	// Get user info
+	user, err := am.apiClient.GetUser()
+	if err != nil {
+		am.mu.Lock()
+		msg := err.Error()
+		am.errorMessage = &msg
+		am.mu.Unlock()
+		return err
+	}
+
+	// Clear device auth UI state after successful auth
+	am.mu.Lock()
+	am.deviceAuthCode = nil
+	am.deviceAuthLoginURL = nil
+	am.mu.Unlock()
+
+	return am.handleSuccessfulAuth(user, *sessionToken)
+}
+
+// handleSuccessfulAuth handles successful authentication
+func (am *AuthManager) handleSuccessfulAuth(user *api.User, token string) error {
+	// Ensure userId is set (map from Id if needed)
+	if user.UserId == "" {
+		user.UserId = user.Id
+	}
+
+	// Save user info to config
+	cfg := am.configManager.GetConfig()
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	cfg.UserId = &user.UserId
+	cfg.Email = &user.Email
+	cfg.Username = user.Username
+	cfg.Name = user.Name
+	am.configManager.Save(cfg)
+
+	am.mu.Lock()
+	am.currentUser = user
+	am.mu.Unlock()
+
+	// Get organizations
+	orgsResponse, err := am.apiClient.ListUserOrgs(user.UserId)
+	if err != nil {
+		// Non-fatal error, continue without org
+		logger.Error("Failed to load organizations: %v", err)
+		am.mu.Lock()
+		am.organizations = []api.Org{}
+		am.mu.Unlock()
+	} else {
+		am.mu.Lock()
+		am.organizations = orgsResponse.Orgs
+		am.mu.Unlock()
+
+		// Restore last selected org from config, or auto-select if only one org
+		if cfg.OrgId != nil {
+			for _, org := range orgsResponse.Orgs {
+				if org.Id == *cfg.OrgId {
+					am.mu.Lock()
+					am.currentOrg = &org
+					am.mu.Unlock()
+					break
+				}
+			}
+		}
+
+		// Auto-select single org or first org if no saved org
+		am.mu.RLock()
+		currentOrg := am.currentOrg
+		am.mu.RUnlock()
+
+		if currentOrg == nil {
+			if len(orgsResponse.Orgs) == 1 {
+				am.mu.Lock()
+				am.currentOrg = &orgsResponse.Orgs[0]
+				am.mu.Unlock()
+				cfg.OrgId = &orgsResponse.Orgs[0].Id
+				am.configManager.Save(cfg)
+			} else if len(orgsResponse.Orgs) > 1 {
+				am.mu.Lock()
+				am.currentOrg = &orgsResponse.Orgs[0]
+				am.mu.Unlock()
+				cfg.OrgId = &orgsResponse.Orgs[0].Id
+				am.configManager.Save(cfg)
+			}
+		}
+	}
+
+	// Ensure OLM credentials exist for this device-account combo
+	if err := am.ensureOlmCredentials(user.UserId); err != nil {
+		logger.Error("Failed to ensure OLM credentials: %v", err)
+		// Non-fatal, continue
+	}
+
+	am.mu.Lock()
+	am.isAuthenticated = true
+	am.errorMessage = nil
+	am.mu.Unlock()
+
+	return nil
+}
+
+// RefreshOrganizations refreshes the list of organizations
+func (am *AuthManager) RefreshOrganizations() error {
+	am.mu.RLock()
+	authenticated := am.isAuthenticated
+	userId := ""
+	if am.currentUser != nil {
+		userId = am.currentUser.UserId
+	}
+	am.mu.RUnlock()
+
+	// Only refresh if authenticated and user ID is available
+	if !authenticated || userId == "" {
+		return nil
+	}
+
+	orgsResponse, err := am.apiClient.ListUserOrgs(userId)
+	if err != nil {
+		logger.Error("Failed to refresh organizations in background: %v", err)
+		return err
+	}
+
+	am.mu.Lock()
+	newOrgs := orgsResponse.Orgs
+	currentOrgId := ""
+	if am.currentOrg != nil {
+		currentOrgId = am.currentOrg.Id
+	}
+
+	// Preserve current org selection if it still exists in the new list
+	if currentOrgId != "" {
+		found := false
+		for _, org := range newOrgs {
+			if org.Id == currentOrgId {
+				am.currentOrg = &org
+				found = true
+				break
+			}
+		}
+		if !found {
+			// Current org no longer exists, clear selection
+			am.currentOrg = nil
+			cfg := am.configManager.GetConfig()
+			if cfg != nil {
+				cfg.OrgId = nil
+				am.configManager.Save(cfg)
+			}
+		}
+	}
+
+	// Update organizations list
+	am.organizations = newOrgs
+	am.mu.Unlock()
+
+	logger.Info("Organizations refreshed successfully: %d orgs", len(newOrgs))
+	return nil
+}
+
+// CheckOrgAccess checks if the user has access to an organization
+func (am *AuthManager) CheckOrgAccess(orgId string) (bool, error) {
+	// First, try to fetch the org to check access
+	_, err := am.apiClient.GetOrg(orgId)
+	if err == nil {
+		return true, nil
+	}
+
+	// Check if it's an unauthorized error
+	apiErr, ok := err.(*api.APIError)
+	if !ok {
+		return false, err
+	}
+
+	if apiErr.Type == api.ErrorTypeHTTPError && (apiErr.Status == 401 || apiErr.Status == 403) {
+		// Try to get org policy to understand why access was denied
+		am.mu.RLock()
+		userId := ""
+		if am.currentUser != nil {
+			userId = am.currentUser.UserId
+		}
+		am.mu.RUnlock()
+
+		if userId != "" {
+			policyResponse, err := am.apiClient.CheckOrgUserAccess(orgId, userId)
+			if err == nil {
+				// Log the policy details
+				var policyDetails []string
+				if policyResponse.Policies != nil {
+					policies := policyResponse.Policies
+					if policies.RequiredTwoFactor != nil {
+						policyDetails = append(policyDetails, fmt.Sprintf("requiredTwoFactor: %v", *policies.RequiredTwoFactor))
+					}
+					if policies.MaxSessionLength != nil {
+						msl := policies.MaxSessionLength
+						policyDetails = append(policyDetails, fmt.Sprintf("maxSessionLength: compliant=%v, maxHours=%d, currentHours=%d", msl.Compliant, msl.MaxSessionLengthHours, msl.SessionAgeHours))
+					}
+					if policies.PasswordAge != nil {
+						pa := policies.PasswordAge
+						policyDetails = append(policyDetails, fmt.Sprintf("passwordAge: compliant=%v, maxDays=%d, currentDays=%d", pa.Compliant, pa.MaxPasswordAgeDays, pa.PasswordAgeDays))
+					}
+				}
+
+				policyLogMessage := "none"
+				if len(policyDetails) > 0 {
+					policyLogMessage = fmt.Sprintf("%v", policyDetails)
+				}
+
+				errorMsg := "none"
+				if policyResponse.Error != nil {
+					errorMsg = *policyResponse.Error
+				}
+
+				logger.Error("Org policy check for org %s: allowed=%v, error=%s, policies=[%s]", orgId, policyResponse.Allowed, errorMsg, policyLogMessage)
+
+				// Return false with a descriptive error
+				return false, fmt.Errorf("org policy preventing access to this org")
+			}
+		}
+
+		// Return false with generic unauthorized message
+		return false, errors.New("unauthorized access to this org. Contact your admin")
+	}
+
+	// Some other error occurred
+	return false, err
+}
+
+// SelectOrganization selects an organization
+func (am *AuthManager) SelectOrganization(org *api.Org) error {
+	// First check org access
+	hasAccess, err := am.CheckOrgAccess(org.Id)
+	if err != nil || !hasAccess {
+		return err
+	}
+
+	// If access is granted, proceed with selecting the org
+	am.mu.Lock()
+	am.currentOrg = org
+	am.mu.Unlock()
+
+	// Save selected org to config
+	cfg := am.configManager.GetConfig()
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	cfg.OrgId = &org.Id
+	am.configManager.Save(cfg)
+
+	// Note: Tunnel manager switching is omitted as requested
+
+	return nil
+}
+
+// EnsureOlmCredentials ensures OLM credentials exist for the user
+func (am *AuthManager) ensureOlmCredentials(userId string) error {
+	// Check if OLM credentials already exist locally
+	if am.secretManager.HasOlmCredentials(userId) {
+		// Verify OLM exists on server by getting the client
+		olmIdString, found := am.secretManager.GetOlmId(userId)
+		if found {
+			clientId, err := strconv.Atoi(olmIdString)
+			if err == nil {
+				client, err := am.apiClient.GetClient(clientId)
+				if err == nil {
+					// Verify the olmId matches
+					if client.OlmId != nil && *client.OlmId == olmIdString {
+						logger.Info("OLM credentials verified successfully")
+						return nil
+					} else {
+						logger.Error("OLM ID mismatch - client olmId: %v, stored olmId: %s", client.OlmId, olmIdString)
+						// Clear invalid credentials
+						am.secretManager.DeleteOlmCredentials(userId)
+					}
+				} else {
+					// If getting client fails, the OLM might not exist
+					logger.Error("Failed to verify OLM credentials: %v", err)
+					// Clear invalid credentials so we can try to create new ones
+					am.secretManager.DeleteOlmCredentials(userId)
+				}
+			} else {
+				// Can't convert olmId to Int, clear credentials
+				logger.Error("Cannot verify OLM - olmId is not a valid clientId")
+				am.secretManager.DeleteOlmCredentials(userId)
+			}
+		}
+	}
+
+	// If credentials don't exist or were cleared, create new ones
+	if !am.secretManager.HasOlmCredentials(userId) {
+		deviceName, err := os.Hostname()
+		if err != nil {
+			deviceName = "Windows Device"
+		}
+
+		olmResponse, err := am.apiClient.CreateOlm(userId, deviceName)
+		if err != nil {
+			return fmt.Errorf("failed to create OLM: %w", err)
+		}
+
+		// Save OLM credentials
+		saved := am.secretManager.SaveOlmCredentials(userId, olmResponse.OlmId, olmResponse.Secret)
+		if !saved {
+			return errors.New("failed to save OLM credentials")
+		}
+	}
+
+	return nil
+}
+
+// Logout logs out the current user
+func (am *AuthManager) Logout() error {
+	am.mu.Lock()
+	am.isLoading = true
+	am.mu.Unlock()
+
+	defer func() {
+		am.mu.Lock()
+		am.isLoading = false
+		am.mu.Unlock()
+	}()
+
+	// Try to call logout endpoint (ignore errors)
+	_ = am.apiClient.Logout()
+
+	// Clear local data
+	am.apiClient.UpdateSessionToken("")
+
+	am.mu.Lock()
+	am.isAuthenticated = false
+	am.currentOrg = nil
+	am.organizations = []api.Org{}
+	am.errorMessage = nil
+	am.deviceAuthCode = nil
+	am.deviceAuthLoginURL = nil
+	am.mu.Unlock()
+
+	return nil
+}
+
+// Getters for state (thread-safe)
+
+func (am *AuthManager) IsAuthenticated() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.isAuthenticated
+}
+
+func (am *AuthManager) CurrentUser() *api.User {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.currentUser
+}
+
+func (am *AuthManager) CurrentOrg() *api.Org {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.currentOrg
+}
+
+func (am *AuthManager) Organizations() []api.Org {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.organizations
+}
+
+func (am *AuthManager) IsLoading() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.isLoading
+}
+
+func (am *AuthManager) IsInitializing() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.isInitializing
+}
+
+func (am *AuthManager) ErrorMessage() *string {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.errorMessage
+}
+
+func (am *AuthManager) DeviceAuthCode() *string {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.deviceAuthCode
+}
+
+func (am *AuthManager) DeviceAuthLoginURL() *string {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.deviceAuthLoginURL
+}
+
+// Helper function
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr ||
+		(len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+			strings.Contains(s, substr))))
+}

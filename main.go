@@ -8,9 +8,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/fosrl/windows/api"
+	"github.com/fosrl/windows/auth"
 	"github.com/fosrl/windows/config"
 	"github.com/fosrl/windows/elevate"
 	"github.com/fosrl/windows/managers"
+	"github.com/fosrl/windows/secrets"
 	"github.com/fosrl/windows/ui"
 	"github.com/fosrl/windows/version"
 
@@ -209,8 +212,20 @@ func main() {
 	}
 	mw.SetVisible(false)
 
+	// Initialize managers
+	configManager := config.NewConfigManager()
+	secretManager := secrets.NewSecretManager()
+	hostname := configManager.GetHostname()
+	apiClient := api.NewAPIClient(hostname, "")
+	authManager := auth.NewAuthManager(apiClient, configManager, secretManager)
+
+	// Initialize auth manager (loads saved session token if available)
+	if err := authManager.Initialize(); err != nil {
+		logger.Error("Failed to initialize auth manager: %v", err)
+	}
+
 	// Setup tray icon and menu
-	if err := ui.SetupTray(mw); err != nil {
+	if err := ui.SetupTray(mw, authManager, configManager, apiClient); err != nil {
 		logger.Fatal("Failed to setup tray: %v", err)
 	}
 

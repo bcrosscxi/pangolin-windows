@@ -273,6 +273,11 @@ loop:
 		select {
 		case <-quitManagersChan:
 			uninstall = true
+			// Set stoppingManager immediately to prevent startProcess goroutines
+			// from restarting UI processes after they exit
+			procsLock.Lock()
+			stoppingManager = true
+			procsLock.Unlock()
 			break loop
 		case c := <-r:
 			switch c.Cmd {

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/fosrl/windows/api"
+	"github.com/fosrl/windows/auth"
 	"github.com/fosrl/windows/config"
 	"github.com/fosrl/windows/managers"
 	"github.com/fosrl/windows/updater"
@@ -38,6 +40,9 @@ var (
 	tunnelStateChangeCb *managers.TunnelStateChangeCallback
 	isConnected         bool
 	connectMutex        sync.RWMutex
+	authManager         *auth.AuthManager
+	configManager       *config.ConfigManager
+	apiClient           *api.APIClient
 )
 
 // setTrayIcon updates the tray icon based on connection status
@@ -73,9 +78,12 @@ func setTrayIcon(connected bool) {
 	}
 }
 
-func SetupTray(mw *walk.MainWindow) error {
+func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManager, ac *api.APIClient) error {
 	// Store references for update menu management
 	mainWindow = mw
+	authManager = am
+	configManager = cm
+	apiClient = ac
 
 	// Create NotifyIcon
 	ni, err := walk.NewNotifyIcon()
@@ -99,7 +107,7 @@ func SetupTray(mw *walk.MainWindow) error {
 	loginAction = walk.NewAction()
 	loginAction.SetText("Login")
 	loginAction.Triggered().Attach(func() {
-		ShowLoginDialog(mw)
+		ShowLoginDialog(mw, authManager, configManager, apiClient)
 	})
 
 	// Create Connect action (toggle button with checkmark)
@@ -248,6 +256,8 @@ func SetupTray(mw *walk.MainWindow) error {
 	quitAction.Triggered().Attach(func() {
 		// Try to quit the manager service (stops tunnels and quits manager)
 		// This only works if we're connected via IPC
+		// Wait for the quit request to complete before exiting to prevent
+		// the manager from restarting this process before it processes the quit
 		go func() {
 			alreadyQuit, err := managers.IPCClientQuit(true) // true = stop tunnels on quit
 			if err != nil {
@@ -257,9 +267,12 @@ func SetupTray(mw *walk.MainWindow) error {
 			} else {
 				logger.Info("Manager service quit requested")
 			}
+			// Exit the UI after the quit request has been sent and acknowledged
+			// This prevents the manager from restarting the process before it processes the quit
+			walk.App().Synchronize(func() {
+				walk.App().Exit(0)
+			})
 		}()
-		// Exit the UI - if connected via IPC, manager will also stop
-		walk.App().Exit(0)
 	})
 
 	// Initialize context menu and add all initial actions
