@@ -26,10 +26,26 @@ func buildTunnel(config Config) error {
 		Version:    "1",
 		OnConnected: func() {
 			logger.Info("OLM connected")
+			// Update state to running when OLM connects
+			SetState(StateRunning)
+			notifyStateChange(StateRunning)
 		},
 		OnRegistered: func() {
-			logger.Info("OLM disconnected")
+			logger.Info("OLM registered")
+			// Update state to registered when OLM registers
+			SetState(StateRegistered)
+			notifyStateChange(StateRegistered)
 		},
+		// OnTerminated: func() {
+		// 	logger.Info("OLM terminated")
+		// 	// Force tunnel to disconnected state
+		// 	SetState(StateStopped)
+		// 	notifyStateChange(StateStopped)
+		// 	// This will uninstall the Windows service
+		// 	if err := StopTunnel(); err != nil {
+		// 		logger.Error("Failed to stop tunnel after OLM termination: %v", err)
+		// 	}
+		// },
 	}
 
 	// Initialize OLM with context and GlobalConfig

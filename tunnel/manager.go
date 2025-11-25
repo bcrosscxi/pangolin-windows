@@ -181,8 +181,8 @@ func (tm *Manager) Connect() error {
 			nil,
 		)
 	}
-	if currentState == StateStarting {
-		logger.Info("Tunnel is already starting")
+	if currentState == StateStarting || currentState == StateRegistering || currentState == StateRegistered {
+		logger.Info("Tunnel is already starting/connecting")
 		return formatConnectionError(
 			"Tunnel Already Starting",
 			"The tunnel is already starting. Please wait for it to complete.",
@@ -329,14 +329,24 @@ func (tm *Manager) GetStatusDisplayText() string {
 	tm.mu.RUnlock()
 
 	switch state {
-	case StateRunning:
-		return "Connected"
-	case StateStarting:
-		return "Connecting..."
-	case StateStopping:
-		return "Disconnecting..."
 	case StateStopped:
 		return "Disconnected"
+	case StateStarting:
+		return "Connecting..."
+	case StateRegistering:
+		return "Registering..."
+	case StateRegistered:
+		return "Connecting..."
+	case StateRunning:
+		return "Connected"
+	case StateReconnecting:
+		return "Reconnecting..."
+	case StateStopping:
+		return "Disconnecting..."
+	case StateInvalid:
+		return "Invalid"
+	case StateError:
+		return "Error"
 	default:
 		return "Unknown"
 	}

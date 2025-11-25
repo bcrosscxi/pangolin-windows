@@ -34,8 +34,9 @@ func (s *tunnelService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 		return false, 1
 	}
 
-	SetState(StateRunning)
-	notifyStateChange(StateRunning)
+	// Set state to registering when service starts (before OLM initialization)
+	SetState(StateRegistering)
+	notifyStateChange(StateRegistering)
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
 	// Build and start the tunnel

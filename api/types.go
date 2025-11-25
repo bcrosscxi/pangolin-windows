@@ -138,7 +138,7 @@ type MyDeviceUser struct {
 	EmailVerified     *bool   `json:"emailVerified,omitempty"`
 	ServerAdmin       *bool   `json:"serverAdmin,omitempty"`
 	IdpName           *string `json:"idpName,omitempty"`
-	IdpId             *string `json:"idpId,omitempty"`
+	IdpId             *int `json:"idpId,omitempty"`
 }
 
 // ResponseOrg represents an organization in the my device response

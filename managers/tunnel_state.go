@@ -9,8 +9,13 @@ type TunnelState = tunnel.State
 
 // Tunnel state constants
 const (
-	TunnelStateStopped  = tunnel.StateStopped
-	TunnelStateStarting = tunnel.StateStarting
-	TunnelStateRunning  = tunnel.StateRunning
-	TunnelStateStopping = tunnel.StateStopping
+	TunnelStateStopped      = tunnel.StateStopped
+	TunnelStateStarting     = tunnel.StateStarting
+	TunnelStateRegistering  = tunnel.StateRegistering
+	TunnelStateRegistered   = tunnel.StateRegistered
+	TunnelStateRunning      = tunnel.StateRunning
+	TunnelStateReconnecting = tunnel.StateReconnecting
+	TunnelStateStopping     = tunnel.StateStopping
+	TunnelStateInvalid      = tunnel.StateInvalid
+	TunnelStateError        = tunnel.StateError
 )

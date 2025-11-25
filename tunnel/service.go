@@ -5,7 +5,6 @@ package tunnel
 import (
 	"encoding/json"
 	"sync"
-	"time"
 
 	"github.com/fosrl/newt/logger"
 )
@@ -41,8 +40,13 @@ type State int
 const (
 	StateStopped State = iota
 	StateStarting
+	StateRegistering
+	StateRegistered
 	StateRunning
+	StateReconnecting
 	StateStopping
+	StateInvalid
+	StateError
 )
 
 // String returns the string representation of the tunnel state
@@ -52,10 +56,20 @@ func (s State) String() string {
 		return "stopped"
 	case StateStarting:
 		return "starting"
+	case StateRegistering:
+		return "registering"
+	case StateRegistered:
+		return "registered"
 	case StateRunning:
 		return "running"
+	case StateReconnecting:
+		return "reconnecting"
 	case StateStopping:
 		return "stopping"
+	case StateInvalid:
+		return "invalid"
+	case StateError:
+		return "error"
 	default:
 		return "unknown"
 	}
@@ -88,11 +102,11 @@ func StartTunnel(config Config) error {
 	currentTunnelName = config.Name
 	tunnelNameLock.Unlock()
 
-	// Update state
+	// Update state to registering when user clicks start
 	tunnelStateLock.Lock()
-	tunnelState = StateStarting
+	tunnelState = StateRegistering
 	tunnelStateLock.Unlock()
-	notifyStateChange(StateStarting)
+	notifyStateChange(StateRegistering)
 
 	// Install and start the Windows service
 	// This will spawn a new process
@@ -117,17 +131,6 @@ func StartTunnel(config Config) error {
 		notifyStateChange(StateStopped)
 		return err
 	}
-
-	// State will transition to running when the service actually starts
-	// For now, we'll assume it starts successfully
-	go func() {
-		time.Sleep(1 * time.Second) // Give service time to start
-		tunnelStateLock.Lock()
-		tunnelState = StateRunning
-		tunnelStateLock.Unlock()
-		logger.Info("Tunnel: State transitioned to running")
-		notifyStateChange(StateRunning)
-	}()
 
 	return nil
 }

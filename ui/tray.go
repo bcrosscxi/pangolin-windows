@@ -5,7 +5,6 @@ package ui
 import (
 	"fmt"
 	"math/rand"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/fosrl/windows/version"
 
 	"github.com/fosrl/newt/logger"
+	browser "github.com/pkg/browser"
 	"github.com/tailscale/walk"
 	"github.com/tailscale/win"
 )
@@ -94,23 +94,30 @@ func setTrayIcon(connected bool) {
 
 // openURL opens a URL in the default browser
 func openURL(url string) {
-	cmd := exec.Command("cmd", "/c", "start", url)
-	if err := cmd.Run(); err != nil {
-		logger.Error("Failed to open URL: %v", err)
-	}
+	browser.OpenURL(url)
 }
 
 // getTunnelStatusDisplayText returns the display text for tunnel status
 func getTunnelStatusDisplayText(state tunnel.State) string {
 	switch state {
-	case tunnel.StateRunning:
-		return "Connected"
-	case tunnel.StateStarting:
-		return "Connecting..."
-	case tunnel.StateStopping:
-		return "Disconnecting..."
 	case tunnel.StateStopped:
 		return "Disconnected"
+	case tunnel.StateStarting:
+		return "Connecting..."
+	case tunnel.StateRegistering:
+		return "Registering..."
+	case tunnel.StateRegistered:
+		return "Connecting..."
+	case tunnel.StateRunning:
+		return "Connected"
+	case tunnel.StateReconnecting:
+		return "Reconnecting..."
+	case tunnel.StateStopping:
+		return "Disconnecting..."
+	case tunnel.StateInvalid:
+		return "Invalid"
+	case tunnel.StateError:
+		return "Error"
 	default:
 		return "Unknown"
 	}
@@ -205,8 +212,13 @@ func setupMenu() error {
 				return
 			}
 
-			if tunnelManager.IsConnected() {
-				// Disconnect
+			// Get current state to determine action
+			currentState := tunnelManager.State()
+
+			// Allow disconnect for any state other than Stopped or Stopping
+			// This allows users to cancel the connection process at any time
+			if currentState != tunnel.StateStopped && currentState != tunnel.StateStopping {
+				// Disconnect (or cancel connection)
 				logger.Info("Disconnecting...")
 				err := tunnelManager.Disconnect()
 				if err != nil {
@@ -235,7 +247,7 @@ func setupMenu() error {
 						})
 					})
 				}
-			} else {
+			} else if currentState == tunnel.StateStopped {
 				// Connect
 				err := tunnelManager.Connect()
 				if err != nil {
@@ -265,6 +277,7 @@ func setupMenu() error {
 					})
 				}
 			}
+			// If state is Stopping, do nothing (button should be disabled)
 		}()
 	})
 	actions.Add(connectAction)
@@ -663,16 +676,22 @@ func updateTunnelState() {
 		connectMutex.RUnlock()
 	}
 
+	// Show "Disconnect" for any state other than Stopped or Stopping
+	// This allows users to cancel the connection process at any time
 	connectText := "Connect"
-	if connected {
-		connectText = "Disconnect"
-	} else if state == tunnel.StateStarting {
-		connectText = "Connecting..."
-	} else if state == tunnel.StateStopping {
+	if state == tunnel.StateStopping {
 		connectText = "Disconnecting..."
+		connectAction.SetEnabled(false) // Disable during disconnection
+	} else if state != tunnel.StateStopped {
+		connectText = "Disconnect"
+		connectAction.SetEnabled(true) // Enable to allow cancellation
+	} else {
+		connectText = "Connect"
+		connectAction.SetEnabled(true)
 	}
 	connectAction.SetText(connectText)
-	connectAction.SetChecked(connected)
+	// Set checked state based on whether we're connected or in a connecting state
+	connectAction.SetChecked(state == tunnel.StateRunning || connected)
 }
 
 // updateUserEmail updates the user email display
@@ -722,7 +741,7 @@ func updateOrganizations() {
 		state = tunnel.State(currentTunnelState)
 		tunnelStateMutex.RUnlock()
 	}
-	shouldDisable := state == tunnel.StateStarting || state == tunnel.StateStopping
+	shouldDisable := state == tunnel.StateStarting || state == tunnel.StateRegistering || state == tunnel.StateRegistered || state == tunnel.StateStopping
 
 	// Ensure org count label and separator exist
 	actions := orgMenu.Actions()

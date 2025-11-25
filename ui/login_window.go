@@ -5,7 +5,6 @@ package ui
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/fosrl/windows/tunnel"
 
 	"github.com/fosrl/newt/logger"
+	browser "github.com/pkg/browser"
 	"github.com/tailscale/walk"
 	. "github.com/tailscale/walk/declarative"
 	"github.com/tailscale/win"
@@ -576,10 +576,7 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 
 // openBrowser opens a URL in the default browser
 func openBrowser(url string) {
-	cmd := exec.Command("cmd", "/c", "start", url)
-	if err := cmd.Run(); err != nil {
-		logger.Error("Failed to open browser: %v", err)
-	}
+	browser.OpenURL(url)
 }
 
 // copyToClipboard copies text to the Windows clipboard
