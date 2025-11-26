@@ -4,6 +4,7 @@ package ui
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fosrl/windows/config"
+	"github.com/fosrl/windows/tunnel"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/tailscale/walk"
@@ -27,9 +29,14 @@ const (
 )
 
 type LogWindow struct {
-	*walk.MainWindow
-	logView *walk.TableView
-	model   *logModel
+	*walk.Dialog
+	tabWidget      *walk.TabWidget
+	logView        *walk.TableView
+	olmStatusEdit  *walk.TextEdit
+	model          *logModel
+	tunnelManager  *tunnel.Manager
+	olmStatusQuit  chan bool
+	olmStatusMutex sync.Mutex
 }
 
 type LogLine struct {
@@ -43,8 +50,9 @@ var (
 	logWindowMutex    sync.Mutex
 )
 
-// ShowLogWindow shows the log viewer window (creates if needed, or brings to front)
-func ShowLogWindow(owner walk.Form) error {
+// ShowLogWindow shows the log viewer window (creates if needed, or brings to front).
+// It accepts a tunnel manager to enable OLM status polling in the second tab.
+func ShowLogWindow(owner walk.Form, tm *tunnel.Manager) error {
 	logWindowMutex.Lock()
 	defer logWindowMutex.Unlock()
 
@@ -62,7 +70,7 @@ func ShowLogWindow(owner walk.Form) error {
 	}
 
 	// Create new window
-	lw, err := NewLogWindow(owner)
+	lw, err := NewLogWindow(owner, tm)
 	if err != nil {
 		return err
 	}
@@ -76,20 +84,34 @@ func ShowLogWindow(owner walk.Form) error {
 			logWindowInstance = nil
 		}
 		logWindowMutex.Unlock()
+
+		// Stop OLM status polling
+		if lw.olmStatusQuit != nil {
+			select {
+			case <-lw.olmStatusQuit:
+				// Already closed
+			default:
+				close(lw.olmStatusQuit)
+			}
+		}
 	})
 
+	// Show the dialog (non-modal, doesn't block)
 	lw.SetVisible(true)
 	return nil
 }
 
-func NewLogWindow(owner walk.Form) (*LogWindow, error) {
-	lw := &LogWindow{}
+func NewLogWindow(owner walk.Form, tm *tunnel.Manager) (*LogWindow, error) {
+	lw := &LogWindow{
+		tunnelManager: tm,
+		olmStatusQuit: make(chan bool),
+	}
 
 	var err error
 	var disposables walk.Disposables
 	defer disposables.Treat()
 
-	if lw.MainWindow, err = walk.NewMainWindow(); err != nil {
+	if lw.Dialog, err = walk.NewDialog(owner); err != nil {
 		return nil, err
 	}
 	disposables.Add(lw)
@@ -97,7 +119,20 @@ func NewLogWindow(owner walk.Form) (*LogWindow, error) {
 	lw.SetTitle("Pangolin Logs")
 	lw.SetLayout(walk.NewVBoxLayout())
 
-	if lw.logView, err = walk.NewTableView(lw); err != nil {
+	// Create tab widget
+	if lw.tabWidget, err = walk.NewTabWidget(lw); err != nil {
+		return nil, err
+	}
+
+	// Create first tab for logs
+	logTabPage, err := walk.NewTabPage()
+	if err != nil {
+		return nil, err
+	}
+	logTabPage.SetTitle("Logs")
+	logTabPage.SetLayout(walk.NewVBoxLayout())
+
+	if lw.logView, err = walk.NewTableView(logTabPage); err != nil {
 		return nil, err
 	}
 	lw.logView.SetAlternatingRowBG(true)
@@ -157,7 +192,7 @@ func NewLogWindow(owner walk.Form) (*LogWindow, error) {
 	lw.logView.SetModel(lw.model)
 	setSelectionStatus()
 
-	buttonsContainer, err := walk.NewComposite(lw)
+	buttonsContainer, err := walk.NewComposite(logTabPage)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +207,44 @@ func NewLogWindow(owner walk.Form) (*LogWindow, error) {
 	}
 	saveButton.SetText("&Save")
 	saveButton.Clicked().Attach(lw.onSave)
+
+	// Add log tab to tab widget
+	lw.tabWidget.Pages().Add(logTabPage)
+
+	// Create second tab for OLM status
+	olmTabPage, err := walk.NewTabPage()
+	if err != nil {
+		return nil, err
+	}
+	olmTabPage.SetTitle("OLM Status")
+	olmTabPage.SetLayout(walk.NewVBoxLayout())
+
+	if lw.olmStatusEdit, err = walk.NewTextEdit(olmTabPage); err != nil {
+		return nil, err
+	}
+	lw.olmStatusEdit.SetReadOnly(true)
+	lw.olmStatusEdit.SetText("Loading OLM status...")
+
+	// Enable multiline and scrolling for large JSON content
+	// Get the window handle and set multiline/scroll styles
+	hwnd := lw.olmStatusEdit.Handle()
+	style := win.GetWindowLong(hwnd, win.GWL_STYLE)
+	style |= win.ES_MULTILINE | win.ES_AUTOVSCROLL | win.ES_AUTOHSCROLL | win.WS_VSCROLL | win.WS_HSCROLL
+	win.SetWindowLong(hwnd, win.GWL_STYLE, style)
+
+	// Set monospace font for better JSON readability
+	if font, err := walk.NewFont("Consolas", 10, 0); err == nil {
+		lw.olmStatusEdit.SetFont(font)
+	} else if font, err := walk.NewFont("Courier New", 10, 0); err == nil {
+		// Fallback to Courier New if Consolas is not available
+		lw.olmStatusEdit.SetFont(font)
+	}
+
+	// Add OLM tab to tab widget
+	lw.tabWidget.Pages().Add(olmTabPage)
+
+	// Start OLM status polling
+	go lw.pollOLMStatus()
 
 	disposables.Spare()
 
@@ -223,6 +296,50 @@ func (lw *LogWindow) isAtBottom() bool {
 func (lw *LogWindow) scrollToBottom() {
 	if len(lw.model.items) > 0 {
 		lw.logView.EnsureItemVisible(len(lw.model.items) - 1)
+	}
+}
+
+func (lw *LogWindow) pollOLMStatus() {
+	if lw.tunnelManager == nil {
+		walk.App().Synchronize(func() {
+			lw.olmStatusEdit.SetText("Tunnel manager not available")
+		})
+		return
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-lw.olmStatusQuit:
+			return
+		case <-ticker.C:
+			status, err := lw.tunnelManager.GetOLMStatus()
+			if err != nil {
+				walk.App().Synchronize(func() {
+					lw.olmStatusEdit.SetText("Unable to get status via pipe. Is the tunnel connected?")
+				})
+				continue
+			}
+
+			// Format JSON with indentation
+			jsonData, err := json.MarshalIndent(status, "", "  ")
+			if err != nil {
+				walk.App().Synchronize(func() {
+					lw.olmStatusEdit.SetText(fmt.Sprintf("Error formatting JSON: %v", err))
+				})
+				continue
+			}
+
+			// Convert Unix newlines to Windows line breaks for proper display
+			jsonText := strings.ReplaceAll(string(jsonData), "\n", "\r\n")
+
+			// Update the text edit with formatted JSON
+			walk.App().Synchronize(func() {
+				lw.olmStatusEdit.SetText(jsonText)
+			})
+		}
 	}
 }
 
@@ -353,7 +470,7 @@ func (mdl *logModel) loadInitialLogs() {
 	// Update position to end of file
 	mdl.filePos = mdl.lastSize
 
-	mdl.lw.Synchronize(func() {
+	walk.App().Synchronize(func() {
 		mdl.PublishRowsReset()
 		mdl.lw.scrollToBottom()
 	})
@@ -423,7 +540,7 @@ func (mdl *logModel) readNewLines() {
 	mdl.filePos = currentSize
 	mdl.lastSize = currentSize
 
-	mdl.lw.Synchronize(func() {
+	walk.App().Synchronize(func() {
 		mdl.PublishRowsReset()
 		if isAtBottom {
 			mdl.lw.scrollToBottom()

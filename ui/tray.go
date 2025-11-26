@@ -475,7 +475,7 @@ func setupMenu() error {
 	viewLogsAction.Triggered().Attach(func() {
 		go func() {
 			walk.App().Synchronize(func() {
-				if err := ShowLogWindow(mainWindow); err != nil {
+				if err := ShowLogWindow(mainWindow, tunnelManager); err != nil {
 					logger.Error("Failed to show log window: %v", err)
 					td := walk.NewTaskDialog()
 					_, _ = td.Show(walk.TaskDialogOpts{
