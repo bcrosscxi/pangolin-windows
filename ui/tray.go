@@ -4,7 +4,6 @@ package ui
 
 import (
 	"fmt"
-	"math/rand"
 	"path/filepath"
 	"sync"
 	"time"
@@ -1147,51 +1146,53 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 		}
 	}()
 
-	// Background refresh loop
-	go func() {
-		// Initial delay before first refresh (with jitter)
-		initialJitter := time.Duration(rand.Intn(7000)) * time.Millisecond
-		time.Sleep(initialJitter)
+	// Background refresh loop - DISABLED for now
+	/*
+		go func() {
+			// Initial delay before first refresh (with jitter)
+			initialJitter := time.Duration(rand.Intn(7000)) * time.Millisecond
+			time.Sleep(initialJitter)
 
-		for {
-			if authManager == nil {
-				time.Sleep(180 * time.Second)
-				continue
-			}
+			for {
+				if authManager == nil {
+					time.Sleep(180 * time.Second)
+					continue
+				}
 
-			// Only refresh if authenticated
-			if authManager.IsAuthenticated() {
-				// Get OLM ID
-				olmId, found := authManager.GetOlmId()
-				if found && olmId != "" {
-					// Refresh from MyDevice
-					err := authManager.RefreshFromMyDevice(olmId)
-					if err != nil {
-						logger.Error("Failed to refresh from MyDevice: %v", err)
-					} else {
-						// Update menu to reflect updated orgs
-						updateMenu()
+				// Only refresh if authenticated
+				if authManager.IsAuthenticated() {
+					// Get OLM ID
+					olmId, found := authManager.GetOlmId()
+					if found && olmId != "" {
+						// Refresh from MyDevice
+						err := authManager.RefreshFromMyDevice(olmId)
+						if err != nil {
+							logger.Error("Failed to refresh from MyDevice: %v", err)
+						} else {
+							// Update menu to reflect updated orgs
+							updateMenu()
+						}
 					}
 				}
-			}
 
-			// Check if unauthenticated after refresh (refresh might result in logout)
-			if !authManager.IsAuthenticated() {
-				// If unauthenticated, stop tunnel
-				if tunnelManager != nil && tunnelManager.IsConnected() {
-					logger.Info("User is unauthenticated, stopping tunnel")
-					if err := tunnelManager.Disconnect(); err != nil {
-						logger.Error("Failed to stop tunnel after authentication loss: %v", err)
+				// Check if unauthenticated after refresh (refresh might result in logout)
+				if !authManager.IsAuthenticated() {
+					// If unauthenticated, stop tunnel
+					if tunnelManager != nil && tunnelManager.IsConnected() {
+						logger.Info("User is unauthenticated, stopping tunnel")
+						if err := tunnelManager.Disconnect(); err != nil {
+							logger.Error("Failed to stop tunnel after authentication loss: %v", err)
+						}
 					}
 				}
-			}
 
-			baseInterval := 180 * time.Second
-			jitterRange := 15 * time.Second
-			jitter := time.Duration(rand.Intn(int(2*jitterRange))) - jitterRange
-			time.Sleep(baseInterval + jitter)
-		}
-	}()
+				baseInterval := 180 * time.Second
+				jitterRange := 15 * time.Second
+				jitter := time.Duration(rand.Intn(int(2*jitterRange))) - jitterRange
+				time.Sleep(baseInterval + jitter)
+			}
+		}()
+	*/
 
 	return nil
 }
