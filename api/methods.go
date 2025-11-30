@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/fosrl/newt/logger"
 )
 
 // Login authenticates a user with email and password
@@ -67,6 +69,9 @@ func (c *APIClient) StartDeviceAuth(applicationName string, deviceName *string) 
 	if err := c.parseResponse(data, resp, &response); err != nil {
 		return nil, err
 	}
+
+	// log response for debugging
+	logger.Debug("DeviceAuthStartResponse: %+v", response)
 
 	return &response, nil
 }
