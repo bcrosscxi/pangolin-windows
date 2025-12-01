@@ -414,10 +414,11 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 						Visible:   false,
 					},
 					LineEdit{
-						AssignTo: &urlLineEdit,
-						Text:     selfHostedURL,
-						MinSize:  Size{Width: 300, Height: 0},
-						Visible:  false,
+						AssignTo:  &urlLineEdit,
+						Text:      selfHostedURL,
+						CueBanner: "https://your-server.com",
+						MinSize:   Size{Width: 300, Height: 0},
+						Visible:   false,
 						OnTextChanged: func() {
 							if urlLineEdit != nil {
 								selfHostedURL = urlLineEdit.Text()

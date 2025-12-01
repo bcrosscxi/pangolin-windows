@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"time"
-
-	"github.com/fosrl/newt/logger"
 )
 
 // Login authenticates a user with email and password

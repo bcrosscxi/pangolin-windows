@@ -13,8 +13,7 @@ import (
 )
 
 // buildTunnel builds the tunnel
-// olmTerminateCancel is called when OLM terminates to signal the service to stop
-func buildTunnel(config Config, olmTerminateCancel context.CancelFunc) error {
+func buildTunnel(config Config) error {
 	logger.Debug("Build tunnel called: config: %+v", config)
 
 	// Create context for OLM
@@ -34,10 +33,6 @@ func buildTunnel(config Config, olmTerminateCancel context.CancelFunc) error {
 		},
 		OnTerminated: func() {
 			logger.Info("Tunnel: OLM terminated")
-			// Signal the service to stop itself
-			if olmTerminateCancel != nil {
-				olmTerminateCancel()
-			}
 		},
 	}
 

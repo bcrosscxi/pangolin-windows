@@ -354,6 +354,7 @@ func (tm *Manager) Disconnect() error {
 type OLMStatusResponse struct {
 	Connected       bool                   `json:"connected"`
 	Registered      bool                   `json:"registered"`
+	Terminated      bool                   `json:"terminated"`
 	Version         string                 `json:"version,omitempty"`
 	OrgID           string                 `json:"orgId,omitempty"`
 	PeerStatuses    map[int]*OLMPeerStatus `json:"peers,omitempty"`
@@ -525,6 +526,15 @@ func (tm *Manager) StartStatusPolling() {
 				status, err := tm.GetOLMStatus()
 				if err != nil {
 					logger.Error("Failed to poll OLM status: %v", err)
+					continue
+				}
+
+				// If terminated, disconnect the tunnel
+				if status.Terminated {
+					logger.Info("OLM status indicates terminated, disconnecting tunnel")
+					if err := tm.Disconnect(); err != nil {
+						logger.Error("Failed to disconnect tunnel after termination: %v", err)
+					}
 					continue
 				}
 

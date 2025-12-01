@@ -3,7 +3,6 @@
 package tunnel
 
 import (
-	"context"
 	"time"
 
 	"github.com/fosrl/newt/logger"
@@ -40,34 +39,17 @@ func (s *tunnelService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 	notifyStateChange(StateRegistering)
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
-	// Create context for OLM termination monitoring
-	olmCtx, olmCancel := context.WithCancel(context.Background())
-	defer olmCancel()
-
 	// Build and start the tunnel
-	if err := buildTunnel(config, olmCancel); err != nil {
+	if err := buildTunnel(config); err != nil {
 		logger.Error("Tunnel service: Failed to build tunnel: %v", err)
 		SetState(StateStopped)
 		notifyStateChange(StateStopped)
 		return false, 1
 	}
 
-	// Handle service control requests and OLM termination
+	// Handle service control requests
 	for {
 		select {
-		case <-olmCtx.Done():
-			// OLM terminated, stop the service
-			logger.Info("Tunnel service: OLM terminated, stopping service")
-			SetState(StateStopping)
-			notifyStateChange(StateStopping)
-			changes <- svc.Status{State: svc.StopPending}
-
-			// Destroy the tunnel (cleanup)
-			destroyTunnel(config)
-
-			SetState(StateStopped)
-			notifyStateChange(StateStopped)
-			return false, 0
 		case c, ok := <-r:
 			if !ok {
 				// Channel closed, exit service
