@@ -12,6 +12,10 @@ This client can be used with both:
 - Pangolin for Windows Installer - This is the official page to download the latest installer file for Windows.
 - [All Versions](https://github.com/fosrl/windows/releases) - The releases section of this repository contains release notes and download artifacts for the latest version and all older versions.
 
+## Compatibility
+
+- Compatible with Windows 10+
+
 ## Documentation
 
 Documentation for the Windows client and all other documentation for Pangolin can be found at [docs.pangolin.net](https://docs.pangolin.net/manage/clients/windows).
