@@ -80,7 +80,7 @@ func InstallManager() error {
 
 	svcConfig := mgr.Config{
 		ServiceType:  windows.SERVICE_WIN32_OWN_PROCESS,
-		StartType:    mgr.StartAutomatic,
+		StartType:    mgr.StartManual,
 		ErrorControl: mgr.ErrorNormal,
 		DisplayName:  config.AppName + " Manager",
 	}
@@ -182,7 +182,7 @@ func InstallTunnel(configJSON string) error {
 
 	svcConfig := mgr.Config{
 		ServiceType:  windows.SERVICE_WIN32_OWN_PROCESS,
-		StartType:    mgr.StartAutomatic,
+		StartType:    mgr.StartManual,
 		ErrorControl: mgr.ErrorNormal,
 		Dependencies: []string{"Nsi", "TcpIp"},
 		DisplayName:  config.AppName + " Tunnel: " + name,
