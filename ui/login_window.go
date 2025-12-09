@@ -317,8 +317,17 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 					IconSystem:    walk.TaskDialogSystemIconError,
 					CommonButtons: win.TDCBF_OK_BUTTON,
 				})
-				currentState = stateReadyToLogin
+				hasAutoOpenedBrowser = false
 				if hostingOpt == hostingCloud {
+					// For cloud, go back to hosting selection
+					currentState = stateHostingSelection
+					hostingOpt = hostingNone
+				} else if hostingOpt == hostingSelfHosted {
+					// For self-hosted, go back to URL input stage so user can try again
+					// Preserve selfHostedURL and hostingOpt so login button stays enabled
+					currentState = stateReadyToLogin
+				} else {
+					// Fallback to hosting selection
 					currentState = stateHostingSelection
 					hostingOpt = hostingNone
 				}
@@ -701,11 +710,21 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 					if code != nil {
 						updateCodeDisplay()
 					} else if !isLoggingIn {
-						// Code was cleared, go back
+						// Code was cleared, go back based on hosting option
 						walk.App().Synchronize(func() {
-							currentState = stateHostingSelection
-							hostingOpt = hostingNone
 							hasAutoOpenedBrowser = false
+							if hostingOpt == hostingCloud {
+								// For cloud, go back to hosting selection
+								currentState = stateHostingSelection
+								hostingOpt = hostingNone
+							} else if hostingOpt == hostingSelfHosted {
+								// For self-hosted, go back to URL input stage so user can try again
+								currentState = stateReadyToLogin
+							} else {
+								// Fallback to hosting selection
+								currentState = stateHostingSelection
+								hostingOpt = hostingNone
+							}
 							updateUI()
 						})
 					}
