@@ -49,6 +49,22 @@ var (
 	openLoginDialogMutex sync.Mutex
 )
 
+// normalizeURL ensures the URL has a protocol prefix, defaulting to https:// if none is provided
+func normalizeURL(url string) string {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return url
+	}
+	// Remove trailing slashes
+	url = strings.TrimRight(url, "/")
+	// Check if URL already has a protocol
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		// Add https:// prefix if no protocol is present
+		url = "https://" + url
+	}
+	return url
+}
+
 // Checks relative to executable first, then falls back to installed location
 func getIconsPath() string {
 	// Try relative to executable first
@@ -271,7 +287,7 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 		// Ensure server URL is configured (but don't persist yet)
 		var hostnameToSave string
 		if hostingOpt == hostingSelfHosted {
-			url := strings.TrimSpace(selfHostedURL)
+			url := normalizeURL(selfHostedURL)
 			if url == "" {
 				walk.App().Synchronize(func() {
 					isLoggingIn = false
@@ -432,9 +448,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 						OnTextChanged: func() {
 							if urlLineEdit != nil {
 								selfHostedURL = urlLineEdit.Text()
-								// Clean the URL: trim spaces and remove trailing slashes
-								cleanedURL := strings.TrimSpace(selfHostedURL)
-								cleanedURL = strings.TrimRight(cleanedURL, "/")
+								// Normalize the URL: trim spaces, remove trailing slashes, and add https:// if no protocol
+								cleanedURL := normalizeURL(selfHostedURL)
 
 								if cleanedURL != "" {
 									temporaryHostname = cleanedURL
