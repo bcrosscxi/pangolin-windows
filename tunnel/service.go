@@ -123,6 +123,7 @@ type Config struct {
 	InterfaceName       string   `json:"interfaceName"`
 	UpstreamDNS         []string `json:"upstreamDns"`
 	OverrideDNS         bool     `json:"overrideDns"`
+	TunnelDNS           bool   `json:"tunnelDns"`
 }
 
 func StartTunnel(config Config) error {

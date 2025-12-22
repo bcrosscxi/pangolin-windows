@@ -15,6 +15,7 @@ import (
 type PreferencesTab struct {
 	tabPage             *walk.TabPage
 	dnsOverrideCheckBox *walk.CheckBox
+	dnsTunnelCheckBox   *walk.CheckBox
 	primaryDNSEdit      *walk.LineEdit
 	secondaryDNSEdit    *walk.LineEdit
 	saveButton          *walk.PushButton
@@ -105,6 +106,52 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	}
 	descLabel.SetText("When enabled, the tunnel uses custom DNS servers to resolve internal resources and aliases. External queries use your configured upstream DNS.")
 	descLabel.SetTextColor(walk.RGB(100, 100, 100))
+
+	// DNS Tunnel section
+	dnsTunnelContainer, err := walk.NewComposite(contentContainer)
+	if err != nil {
+		return nil, err
+	}
+	dnsTunnelLayout := walk.NewVBoxLayout()
+	dnsTunnelLayout.SetMargins(walk.Margins{})
+	dnsTunnelLayout.SetSpacing(8)
+	dnsTunnelContainer.SetLayout(dnsTunnelLayout)
+
+	// DNS Tunnel label and checkbox row
+	dnsTunnelRow, err := walk.NewComposite(dnsTunnelContainer)
+	if err != nil {
+		return nil, err
+	}
+	dnsTunnelRowLayout := walk.NewHBoxLayout()
+	dnsTunnelRowLayout.SetMargins(walk.Margins{})
+	dnsTunnelRowLayout.SetSpacing(12)
+	dnsTunnelRow.SetLayout(dnsTunnelRowLayout)
+
+	// DNS Tunnel label
+	dnsTunnelLabel, err := walk.NewLabel(dnsTunnelRow)
+	if err != nil {
+		return nil, err
+	}
+	dnsTunnelLabel.SetText("DNS Tunnel")
+	dnsTunnelLabel.SetMinMaxSize(walk.Size{Width: 200, Height: 0}, walk.Size{Width: 200, Height: 0})
+
+	// DNS Tunnel checkbox
+	if pt.dnsTunnelCheckBox, err = walk.NewCheckBox(dnsTunnelRow); err != nil {
+		return nil, err
+	}
+	pt.dnsTunnelCheckBox.SetChecked(pt.configManager.GetDNSTunnel()) // Get value from config
+	pt.dnsTunnelCheckBox.SetText("")                                 // No text, just the checkbox
+
+	// Spacer
+	walk.NewHSpacer(dnsTunnelRow)
+
+	// DNS Tunnel description label (below the row)
+	dnsTunnelDescLabel, err := walk.NewLabel(dnsTunnelContainer)
+	if err != nil {
+		return nil, err
+	}
+	dnsTunnelDescLabel.SetText("When enabled, DNS queries are sent through the tunnel to a resource. A private resource must be created for the address for it to work and resolve to the correct site.")
+	dnsTunnelDescLabel.SetTextColor(walk.RGB(100, 100, 100))
 
 	// Primary DNS Server section
 	primaryDNSContainer, err := walk.NewComposite(contentContainer)
@@ -202,6 +249,7 @@ func (pt *PreferencesTab) Cleanup() {
 func (pt *PreferencesTab) onSave() {
 	// Get current values from UI
 	dnsOverride := pt.dnsOverrideCheckBox.Checked()
+	dnsTunnel := pt.dnsTunnelCheckBox.Checked()
 	primaryDNS := strings.TrimSpace(pt.primaryDNSEdit.Text())
 	secondaryDNS := strings.TrimSpace(pt.secondaryDNSEdit.Text())
 
@@ -259,8 +307,10 @@ func (pt *PreferencesTab) onSave() {
 
 	// Set DNS settings
 	dnsOverrideVal := dnsOverride
+	dnsTunnelVal := dnsTunnel
 	primaryDNSVal := primaryDNS
 	cfg.DNSOverride = &dnsOverrideVal
+	cfg.DNSTunnel = &dnsTunnelVal
 	cfg.PrimaryDNS = &primaryDNSVal
 	if secondaryDNS != "" {
 		cfg.SecondaryDNS = &secondaryDNS

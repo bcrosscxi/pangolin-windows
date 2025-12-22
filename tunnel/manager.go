@@ -150,6 +150,7 @@ func (tm *Manager) buildConfig() (Config, error) {
 	primaryDNS := tm.configManager.GetPrimaryDNS()
 	secondaryDNS := tm.configManager.GetSecondaryDNS()
 	dnsOverride := tm.configManager.GetDNSOverride()
+	dnsTunnel := tm.configManager.GetDNSTunnel()
 
 	// Build UpstreamDNS array with :53 appended to each
 	upstreamDNS := []string{primaryDNS + ":53"}
@@ -172,6 +173,7 @@ func (tm *Manager) buildConfig() (Config, error) {
 		InterfaceName:       "Pangolin",
 		UpstreamDNS:         upstreamDNS, // Each value has :53 appended
 		OverrideDNS:         dnsOverride,
+		TunnelDNS:           dnsTunnel,
 	}
 
 	return config, nil

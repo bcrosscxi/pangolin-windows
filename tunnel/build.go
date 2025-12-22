@@ -55,6 +55,7 @@ func buildTunnel(config Config) error {
 		InterfaceName:        config.InterfaceName,
 		UpstreamDNS:          config.UpstreamDNS,
 		OverrideDNS:          config.OverrideDNS,
+		TunnelDNS:            config.TunnelDNS,
 	}
 
 	olmpkg.StartApi()

@@ -20,6 +20,7 @@ const (
 	LogLevel           = "debug" // Centralized log level for the application
 	DefaultPrimaryDNS  = "9.9.9.9"
 	DefaultDNSOverride = true
+	DefaultDNSTunnel   = false
 )
 
 // Config represents the application configuration
@@ -31,6 +32,7 @@ type Config struct {
 	Name         *string `json:"name,omitempty"`
 	Hostname     *string `json:"hostname,omitempty"`
 	DNSOverride  *bool   `json:"dnsOverride,omitempty"`
+	DNSTunnel    *bool   `json:"dnsTunnel,omitempty"`
 	PrimaryDNS   *string `json:"primaryDNS,omitempty"`
 	SecondaryDNS *string `json:"secondaryDNS,omitempty"`
 }
@@ -172,6 +174,17 @@ func (cm *ConfigManager) GetDNSOverride() bool {
 	return DefaultDNSOverride
 }
 
+// GetDNSTunnel returns the DNS tunnel setting from config or false if not set
+func (cm *ConfigManager) GetDNSTunnel() bool {
+    cm.mu.RLock()
+    defer cm.mu.RUnlock()
+
+    if cm.config != nil && cm.config.DNSTunnel != nil {
+        return *cm.config.DNSTunnel
+    }
+    return DefaultDNSTunnel
+}
+
 // GetPrimaryDNS returns the primary DNS server from config or the default value
 func (cm *ConfigManager) GetPrimaryDNS() string {
 	cm.mu.RLock()
@@ -203,6 +216,17 @@ func (cm *ConfigManager) SetDNSOverride(value bool) bool {
 	cfg := cm.getConfigCopy()
 	cfg.DNSOverride = &value
 	return cm.save(cfg)
+}
+
+// SetDNSTunnel sets the DNS tunnel setting and saves to config
+func (cm *ConfigManager) SetDNSTunnel(value bool) bool {
+    cm.mu.Lock()
+    defer cm.mu.Unlock()
+
+    // Get current config and copy it to preserve all fields
+    cfg := cm.getConfigCopy()
+    cfg.DNSTunnel = &value
+    return cm.save(cfg)
 }
 
 // SetPrimaryDNS sets the primary DNS server and saves to config
@@ -268,6 +292,10 @@ func (cm *ConfigManager) getConfigCopy() *Config {
 		dnsOverride := *cm.config.DNSOverride
 		cfg.DNSOverride = &dnsOverride
 	}
+	if cm.config.DNSTunnel != nil {
+        dnsTunnel := *cm.config.DNSTunnel
+        cfg.DNSTunnel = &dnsTunnel
+    }
 	if cm.config.PrimaryDNS != nil {
 		primaryDNS := *cm.config.PrimaryDNS
 		cfg.PrimaryDNS = &primaryDNS
