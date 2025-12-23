@@ -191,7 +191,7 @@ func setupMenu() error {
 
 	// Create update action (initially hidden)
 	updateAction = walk.NewAction()
-	updateAction.SetText("Update available")
+	updateAction.SetText("Update Available")
 	updateAction.SetVisible(false) // Hidden initially
 	updateAction.Triggered().Attach(func() {
 		go triggerUpdate(mainWindow)
