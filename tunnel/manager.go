@@ -382,6 +382,7 @@ type OLMStatusResponse struct {
 	Registered      bool                   `json:"registered"`
 	Terminated      bool                   `json:"terminated"`
 	Version         string                 `json:"version,omitempty"`
+	Agent           string                 `json:"agent,omitempty"`
 	OrgID           string                 `json:"orgId,omitempty"`
 	PeerStatuses    map[int]*OLMPeerStatus `json:"peers,omitempty"`
 	NetworkSettings map[string]interface{} `json:"networkSettings,omitempty"`
