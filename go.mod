@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/fosrl/newt v1.8.0
-	github.com/fosrl/olm v0.0.0
+	github.com/fosrl/olm v1.3.1-0.20260115201336-70a7e83291cd
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/tailscale/walk v0.0.0-20251016200523-963e260a8227
 	github.com/tailscale/win v0.0.0-20250213223159-5992cb43ca35
@@ -39,6 +39,6 @@ require (
 	software.sslmate.com/src/go-pkcs12 v0.6.0 // indirect
 )
 
-replace github.com/fosrl/olm v0.0.0 => ../olm
-
-replace github.com/fosrl/newt v0.0.0 => ../newt
+// Uncomment when developing dependencies.
+// replace github.com/fosrl/olm v0.0.0 => ../olm
+// replace github.com/fosrl/newt v0.0.0 => ../newt
