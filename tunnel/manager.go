@@ -608,9 +608,9 @@ func (tm *Manager) StartStatusPolling() {
 				}
 
 				// Update tunnel state based on OLM status
-				// Connected takes precedence over Registered
+				// Only consider connected if both registered and connected
 				var newState State
-				if status.Connected {
+				if status.Connected && status.Registered {
 					newState = StateRunning
 				} else if status.Registered {
 					newState = StateRegistered
