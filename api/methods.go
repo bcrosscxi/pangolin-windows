@@ -127,6 +127,31 @@ func (c *APIClient) GetUser() (*User, error) {
 	return &user, nil
 }
 
+// RecoverOlmFromFingerprint recovers a user's OLM credentials from
+// a fingerprint.
+func (c *APIClient) RecoverOlmFromFingerprint(userID string, platformFingerprint string) (*RecoverOlmResponse, error) {
+	path := fmt.Sprintf("/user/%s/olm/recover", userID)
+	requestBody := RecoverOlmRequest{
+		PlatformFingerprint: platformFingerprint,
+	}
+	bodyData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, &APIError{Type: ErrorTypeDecodingError, Err: err}
+	}
+
+	data, resp, err := c.makeRequest("POST", path, bodyData)
+	if err != nil {
+		return nil, err
+	}
+
+	var newOlmCreds RecoverOlmResponse
+	if err := c.parseResponse(data, resp, &newOlmCreds); err != nil {
+		return nil, err
+	}
+
+	return &newOlmCreds, nil
+}
+
 // ListUserOrgs lists organizations for a user
 func (c *APIClient) ListUserOrgs(userId string) (*ListUserOrgsResponse, error) {
 	path := fmt.Sprintf("/user/%s/orgs", userId)

@@ -83,6 +83,15 @@ type CreateOlmResponse struct {
 	Name   string `json:"name"`
 }
 
+type RecoverOlmRequest struct {
+	PlatformFingerprint string `json:"platformFingerprint"`
+}
+
+type RecoverOlmResponse struct {
+	OlmID  string `json:"olmId"`
+	Secret string `json:"secret"`
+}
+
 // GetOrgResponse represents the response for getting an organization
 type GetOrgResponse struct {
 	Id   string `json:"id"`

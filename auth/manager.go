@@ -12,6 +12,7 @@ import (
 
 	"github.com/fosrl/windows/api"
 	"github.com/fosrl/windows/config"
+	"github.com/fosrl/windows/fingerprint"
 	"github.com/fosrl/windows/secrets"
 
 	"github.com/fosrl/newt/logger"
@@ -329,12 +330,6 @@ func (am *AuthManager) handleSuccessfulAuth(user *api.User, hostname string, tok
 
 	_ = am.secretManager.SaveSessionToken(user.UserId, token)
 
-	// Ensure OLM credentials exist for this device-account combo
-	if err := am.EnsureOlmCredentials(user.UserId); err != nil {
-		logger.Error("Failed to ensure OLM credentials: %v", err)
-		// Non-fatal, continue
-	}
-
 	var username string
 	if user.Username != nil {
 		username = *user.Username
@@ -627,21 +622,33 @@ func (am *AuthManager) EnsureOlmCredentials(userId string) error {
 		}
 	}
 
-	// If credentials don't exist or were cleared, create new ones
-	if !am.secretManager.HasOlmCredentials(userId) {
-		// Get friendly device name (e.g., "Windows Laptop" or "Windows Desktop")
-		deviceName := config.GetFriendlyDeviceName()
+	fp := fingerprint.GatherFingerprintInfo()
 
-		olmResponse, err := am.apiClient.CreateOlm(userId, deviceName)
-		if err != nil {
-			return fmt.Errorf("failed to create OLM: %w", err)
-		}
-
-		// Save OLM credentials
-		saved := am.secretManager.SaveOlmCredentials(userId, olmResponse.OlmId, olmResponse.Secret)
+	// First, attempt to recover the credentials and associate it with
+	// an existing device.
+	recoveredCreds, err := am.apiClient.RecoverOlmFromFingerprint(userId, fp.PlatformFingerprint)
+	if err == nil {
+		saved := am.secretManager.SaveOlmCredentials(userId, recoveredCreds.OlmID, recoveredCreds.Secret)
 		if !saved {
 			return errors.New("failed to save OLM credentials")
 		}
+
+		return nil
+	}
+
+	// If credentials don't exist or were cleared, create new ones
+	// Get friendly device name (e.g., "Windows Laptop" or "Windows Desktop")
+	deviceName := config.GetFriendlyDeviceName()
+
+	olmResponse, err := am.apiClient.CreateOlm(userId, deviceName)
+	if err != nil {
+		return fmt.Errorf("failed to create OLM: %w", err)
+	}
+
+	// Save OLM credentials
+	saved := am.secretManager.SaveOlmCredentials(userId, olmResponse.OlmId, olmResponse.Secret)
+	if !saved {
+		return errors.New("failed to save OLM credentials")
 	}
 
 	return nil
@@ -731,6 +738,7 @@ func (am *AuthManager) Logout() error {
 	am.mu.Unlock()
 
 	_ = am.secretManager.DeleteSessionToken(userID)
+	_ = am.secretManager.DeleteOlmCredentials(userID)
 
 	_ = am.accountManager.RemoveAccount(userID)
 
