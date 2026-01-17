@@ -10,18 +10,19 @@ import (
 
 	olmpkg "github.com/fosrl/olm/olm"
 	configpkg "github.com/fosrl/windows/config"
+	"github.com/fosrl/windows/fingerprint"
 	"github.com/fosrl/windows/version"
 )
 
 // buildTunnel builds the tunnel
-func buildTunnel(config Config) error {
+func (s *tunnelService) buildTunnel(config Config) error {
 	logger.Debug("Build tunnel called: config: %+v", config)
 
 	// Create context for OLM
 	olmContext := context.Background()
 
 	// Create OLM GlobalConfig with hardcoded values from Swift
-	olmInitConfig := olmpkg.GlobalConfig{
+	olmInitConfig := olmpkg.OlmConfig{
 		LogLevel:   configpkg.LogLevel,
 		EnableAPI:  true,
 		SocketPath: OLMNamedPipePath,
@@ -39,7 +40,14 @@ func buildTunnel(config Config) error {
 	}
 
 	// Initialize OLM with context and GlobalConfig
-	olmpkg.Init(olmContext, olmInitConfig)
+	var err error
+	s.olm, err = olmpkg.Init(olmContext, olmInitConfig)
+	if err != nil {
+		return err
+	}
+
+	initialFingerprint := fingerprint.GatherFingerprintInfo().ToMap()
+	initialPostures := fingerprint.GatherPostureChecks().ToMap()
 
 	olmConfig := olmpkg.TunnelConfig{
 		Endpoint:             config.Endpoint,
@@ -56,13 +64,35 @@ func buildTunnel(config Config) error {
 		UpstreamDNS:          config.UpstreamDNS,
 		OverrideDNS:          config.OverrideDNS,
 		TunnelDNS:            config.TunnelDNS,
+		InitialFingerprint:   initialFingerprint,
+		InitialPostures:      initialPostures,
 	}
 
-	olmpkg.StartApi()
+	s.fingerprintCtx, s.fingerprintCancel = context.WithCancel(context.Background())
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-s.fingerprintCtx.Done():
+				return
+			case <-ticker.C:
+				fp := fingerprint.GatherFingerprintInfo().ToMap()
+				postures := fingerprint.GatherPostureChecks().ToMap()
+
+				s.olm.SetFingerprint(fp)
+				s.olm.SetPostures(postures)
+			}
+		}
+	}()
+
+	s.olm.StartApi()
 
 	logger.Info("Starting OLM tunnel...")
 	go func() {
-		olmpkg.StartTunnel(olmConfig)
+		s.olm.StartTunnel(olmConfig)
 		logger.Info("OLM tunnel stopped")
 	}()
 
