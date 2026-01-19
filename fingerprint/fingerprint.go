@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -71,14 +72,43 @@ func GatherFingerprintInfo() *Fingerprint {
 }
 
 func GatherPostureChecks() *PostureChecks {
-	return &PostureChecks{
-		BiometricsEnabled:  windowsBiometricsEnabled(),
-		DiskEncrypted:      windowsDiskEncrypted(),
-		FirewallEnabled:    windowsFirewallEnabled(),
-		AutoUpdatesEnabled: windowsAutoUpdatesEnabled(),
-		TpmAvailable:       windowsTPMAvailable(),
+	var wg sync.WaitGroup
 
-		WindowsDefenderEnabled: windowsDefenderEnabled(),
+	var biometrics, diskEncrypted, firewall, autoUpdates, tpm, defender bool
+
+	wg.Go(func() {
+		biometrics = windowsBiometricsEnabled()
+	})
+
+	wg.Go(func() {
+		diskEncrypted = windowsDiskEncrypted()
+	})
+
+	wg.Go(func() {
+		firewall = windowsFirewallEnabled()
+	})
+
+	wg.Go(func() {
+		autoUpdates = windowsAutoUpdatesEnabled()
+	})
+
+	wg.Go(func() {
+		tpm = windowsTPMAvailable()
+	})
+
+	wg.Go(func() {
+		defender = windowsDefenderEnabled()
+	})
+
+	wg.Wait()
+
+	return &PostureChecks{
+		BiometricsEnabled:      biometrics,
+		DiskEncrypted:          diskEncrypted,
+		FirewallEnabled:        firewall,
+		AutoUpdatesEnabled:     autoUpdates,
+		TpmAvailable:           tpm,
+		WindowsDefenderEnabled: defender,
 	}
 }
 
