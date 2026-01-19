@@ -311,3 +311,38 @@ func (c *APIClient) TestConnection() (bool, error) {
 	// Consider 200-299 and 404 as successful connection
 	return (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == 404, nil
 }
+
+// GetServerInfo gets server information including version, build type, and license status
+func (c *APIClient) GetServerInfo() (*ServerInfo, error) {
+	data, resp, err := c.makeRequest("GET", "/server-info", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var serverInfo ServerInfo
+	if err := c.parseResponse(data, resp, &serverInfo); err != nil {
+		return nil, err
+	}
+
+	return &serverInfo, nil
+}
+
+// CheckHealth checks if the server is reachable and responding
+// Returns true if status is 200-299, 401, or 403 (server is up)
+// Returns false if server is unreachable or returns other error status
+func (c *APIClient) CheckHealth() (bool, error) {
+	_, resp, err := c.makeRequest("GET", "", nil)
+	if err != nil {
+		// Network error means server is down
+		return false, nil
+	}
+
+	// Server is up if status is 200-299, 401, or 403
+	statusCode := resp.StatusCode
+	if (statusCode >= 200 && statusCode < 300) || statusCode == 401 || statusCode == 403 {
+		return true, nil
+	}
+
+	// Other status codes mean server is down or error
+	return false, nil
+}

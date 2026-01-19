@@ -64,6 +64,8 @@ type AuthManager struct {
 	errorMessage       *string
 	deviceAuthCode     *string
 	deviceAuthLoginURL *string
+	serverInfo         *api.ServerInfo
+	isServerDown       bool
 }
 
 // NewAuthManager creates a new AuthManager instance
@@ -99,7 +101,23 @@ func (am *AuthManager) Initialize() error {
 		// Load session token from Keychain
 		token, found := am.secretManager.GetSessionToken(activeAccount.UserID)
 		if found && token != "" {
+			am.apiClient.UpdateBaseURL(activeAccount.Hostname)
 			am.apiClient.UpdateSessionToken(token)
+
+			// Health check before fetching user/orgs
+			_ = am.CheckHealthAndSetState()
+
+			am.mu.RLock()
+			serverDown := am.isServerDown
+			am.mu.RUnlock()
+
+			if serverDown {
+				// Server is down, but keep authenticated state to show UI
+				am.mu.Lock()
+				am.isAuthenticated = true
+				am.mu.Unlock()
+				return nil
+			}
 
 			// Always fetch the latest user info to verify the user exists and update stored info
 			user, err := am.apiClient.GetUser()
@@ -110,6 +128,17 @@ func (am *AuthManager) Initialize() error {
 				am.mu.Unlock()
 				return nil // Not an error, just not authenticated
 			}
+
+			// Update account info with user data
+			var username string
+			if user.Username != nil {
+				username = *user.Username
+			}
+			var name string
+			if user.Name != nil {
+				name = *user.Name
+			}
+			_ = am.accountManager.UpdateAccountUserInfo(activeAccount.UserID, username, name)
 
 			// Update stored config with latest user info
 			return am.handleSuccessfulAuth(user, activeAccount.Hostname, token)
@@ -355,6 +384,10 @@ func (am *AuthManager) handleSuccessfulAuth(user *api.User, hostname string, tok
 	am.mu.Lock()
 	am.isAuthenticated = true
 	am.mu.Unlock()
+
+	// Fetch server info after successful authentication
+	_ = am.fetchServerInfo()
+
 	return nil
 }
 
@@ -655,55 +688,76 @@ func (am *AuthManager) EnsureOlmCredentials(userId string) error {
 }
 
 func (am *AuthManager) SwitchAccount(userID string) error {
-	am.mu.Lock()
-	am.isAuthenticated = false
-	am.mu.Unlock()
-
-	defer func() {
-		am.mu.Lock()
-		am.isAuthenticated = true
-		am.mu.Unlock()
-	}()
-
 	accountToSwitchTo, exists := am.accountManager.Accounts[userID]
 	if !exists {
 		return errors.New("account does not exist")
 	}
 
 	token, found := am.secretManager.GetSessionToken(accountToSwitchTo.UserID)
-	if found && token != "" {
-		am.apiClient.UpdateBaseURL(accountToSwitchTo.Hostname)
-		am.apiClient.UpdateSessionToken(token)
-
-		// Always fetch the latest user info to verify the user exists and update stored info
-		var err error
-		user, err := am.apiClient.GetUser()
-		if err != nil {
-			// This should never happen, but if it does, silently
-			// fail and switch to an unauthenticated state to prevent
-			// any more unreachable situations from happening.
-			am.mu.Lock()
-			am.isAuthenticated = false
-			am.mu.Unlock()
-			return nil
-		}
-
-		am.UpdateCurrentUser(user)
-	} else {
+	if !found || token == "" {
 		return errors.New("session token does not exist for this user")
 	}
 
+	// Step 1: Switch locally first (optimistic switch)
+	_ = am.accountManager.SetActiveUser(userID)
+	am.apiClient.UpdateBaseURL(accountToSwitchTo.Hostname)
+	am.apiClient.UpdateSessionToken(token)
+
+	// Step 2: Clear user data immediately
+	am.mu.Lock()
+	am.currentUser = nil
+	am.currentOrg = nil
+	am.organizations = []api.Org{}
+	am.serverInfo = nil // Clear server info to avoid showing stale data
+	am.isAuthenticated = true
+	am.isServerDown = false
+	am.errorMessage = nil
+	am.mu.Unlock()
+
+	// Step 3: Validate with server (health check, fetch user, select org, fetch server info)
+	_ = am.CheckHealthAndSetState()
+
+	am.mu.RLock()
+	serverDown := am.isServerDown
+	am.mu.RUnlock()
+
+	if serverDown {
+		// Server is down, but account is switched - show error but don't revert
+		logger.Warn("Server appears to be down after account switch")
+		return nil
+	}
+
+	// Fetch user data
+	user, err := am.apiClient.GetUser()
+	if err != nil {
+		// Show error but don't revert switch
+		am.mu.Lock()
+		msg := err.Error()
+		am.errorMessage = &msg
+		am.mu.Unlock()
+		logger.Error("Failed to fetch user after account switch: %v", err)
+		return nil
+	}
+
+	// Update account info with user data
+	var username string
+	if user.Username != nil {
+		username = *user.Username
+	}
+	var name string
+	if user.Name != nil {
+		name = *user.Name
+	}
+	_ = am.accountManager.UpdateAccountUserInfo(userID, username, name)
+
+	am.UpdateCurrentUser(user)
+
+	// Select organization
 	selectedOrgID := am.ensureOrgIsSelected(&accountToSwitchTo)
+	_ = am.accountManager.SetUserOrganization(userID, selectedOrgID)
 
-	err := am.accountManager.SetUserOrganization(userID, selectedOrgID)
-	if err != nil {
-		logger.Warn("failed to set user's org ID in accounts store: %v", err)
-	}
-
-	err = am.accountManager.SetActiveUser(userID)
-	if err != nil {
-		logger.Warn("failed to set active user in accounts store: %v", err)
-	}
+	// Fetch server info
+	_ = am.fetchServerInfo()
 
 	return nil
 }
@@ -758,6 +812,49 @@ func (am *AuthManager) Logout() error {
 	return nil
 }
 
+// CheckHealthAndSetState performs a health check and updates the server down state
+func (am *AuthManager) CheckHealthAndSetState() error {
+	healthy, err := am.apiClient.CheckHealth()
+	if err != nil {
+		// Network error means server is down
+		am.mu.Lock()
+		am.isServerDown = true
+		msg := "The server appears to be down."
+		am.errorMessage = &msg
+		am.mu.Unlock()
+		return err
+	}
+
+	am.mu.Lock()
+	if !healthy {
+		am.isServerDown = true
+		msg := "The server appears to be down."
+		am.errorMessage = &msg
+	} else {
+		am.isServerDown = false
+		am.errorMessage = nil
+	}
+	am.mu.Unlock()
+
+	return nil
+}
+
+// fetchServerInfo fetches and stores server information
+func (am *AuthManager) fetchServerInfo() error {
+	serverInfo, err := am.apiClient.GetServerInfo()
+	if err != nil {
+		// Non-fatal error, just log it
+		logger.Error("Failed to fetch server info: %v", err)
+		return err
+	}
+
+	am.mu.Lock()
+	am.serverInfo = serverInfo
+	am.mu.Unlock()
+
+	return nil
+}
+
 // Getters for state (thread-safe)
 
 func (am *AuthManager) IsAuthenticated() bool {
@@ -806,6 +903,18 @@ func (am *AuthManager) DeviceAuthLoginURL() *string {
 	am.mu.RLock()
 	defer am.mu.RUnlock()
 	return am.deviceAuthLoginURL
+}
+
+func (am *AuthManager) ServerInfo() *api.ServerInfo {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.serverInfo
+}
+
+func (am *AuthManager) IsServerDown() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.isServerDown
 }
 
 // ClearDeviceAuth clears the device authentication code and URL
