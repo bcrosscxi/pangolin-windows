@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/fosrl/newt/logger"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -35,11 +36,8 @@ type Fingerprint struct {
 type PostureChecks struct {
 	// Platform-agnostic checks
 
-	BiometricsEnabled  bool `json:"biometricsEnabled"`
-	DiskEncrypted      bool `json:"diskEncrypted"`
-	FirewallEnabled    bool `json:"firewallEnabled"`
-	AutoUpdatesEnabled bool `json:"autoUpdatesEnabled"`
-	TpmAvailable       bool `json:"tpmAvailable"`
+	DiskEncrypted   bool `json:"diskEncrypted"`
+	FirewallEnabled bool `json:"firewallEnabled"`
 
 	// Windows-specific posture check information
 
@@ -74,11 +72,7 @@ func GatherFingerprintInfo() *Fingerprint {
 func GatherPostureChecks() *PostureChecks {
 	var wg sync.WaitGroup
 
-	var biometrics, diskEncrypted, firewall, autoUpdates, tpm, defender bool
-
-	wg.Go(func() {
-		biometrics = windowsBiometricsEnabled()
-	})
+	var diskEncrypted, firewall, defender bool
 
 	wg.Go(func() {
 		diskEncrypted = windowsDiskEncrypted()
@@ -89,25 +83,14 @@ func GatherPostureChecks() *PostureChecks {
 	})
 
 	wg.Go(func() {
-		autoUpdates = windowsAutoUpdatesEnabled()
-	})
-
-	wg.Go(func() {
-		tpm = windowsTPMAvailable()
-	})
-
-	wg.Go(func() {
 		defender = windowsDefenderEnabled()
 	})
 
 	wg.Wait()
 
 	return &PostureChecks{
-		BiometricsEnabled:      biometrics,
 		DiskEncrypted:          diskEncrypted,
 		FirewallEnabled:        firewall,
-		AutoUpdatesEnabled:     autoUpdates,
-		TpmAvailable:           tpm,
 		WindowsDefenderEnabled: defender,
 	}
 }
@@ -161,101 +144,127 @@ func getWindowsModelAndSerial() (string, string) {
 }
 
 func windowsDiskEncrypted() bool {
-	cmd := exec.Command(`C:\Windows\System32\manage-bde.exe`, "-status", "C:")
+	command := "Get-BitLockerVolume -MountPoint 'C:' | Select-Object -ExpandProperty VolumeStatus"
+	logger.Debug("Posture check: Disk Encryption - Executing PowerShell command: %s", command)
+
+	cmd := exec.Command("powershell.exe", "-Command", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 
-	if err != nil && len(out) == 0 {
+	if err != nil {
+		logger.Debug("Posture check: Disk Encryption - Command failed with error: %v", err)
 		return false
 	}
 
-	s := string(out)
-	return strings.Contains(s, "Protection On")
+	rawOutput := string(out)
+	logger.Debug("Posture check: Disk Encryption - Raw command output: %q", rawOutput)
+
+	s := strings.TrimSpace(rawOutput)
+	logger.Debug("Posture check: Disk Encryption - Trimmed output: %q", s)
+
+	result := s == "FullyEncrypted" || s == "EncryptionInProgress"
+	logger.Debug("Posture check: Disk Encryption - Result: %v (status: %q)", result, s)
+	return result
 }
 
 func windowsFirewallEnabled() bool {
-	profiles := []string{"DomainProfile", "StandardProfile", "PublicProfile"}
+	command := "(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq $true }).Count -gt 0"
+	logger.Debug("Posture check: Firewall - Executing PowerShell command: %s", command)
 
-	for _, profile := range profiles {
-		keyPath := fmt.Sprintf(`SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\%s`, profile)
-		k, err := registry.OpenKey(registry.LOCAL_MACHINE, keyPath, registry.QUERY_VALUE)
-		if err != nil {
-			continue
-		}
-		defer k.Close()
+	cmd := exec.Command("powershell.exe", "-Command", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
 
-		val, _, err := k.GetIntegerValue("EnableFirewall")
-		if err != nil {
-			continue
-		}
-
-		if val != 0 {
-			return true
-		}
+	if err != nil {
+		logger.Debug("Posture check: Firewall - Command failed with error: %v", err)
+		return false
 	}
 
-	return false
+	rawOutput := string(out)
+	logger.Debug("Posture check: Firewall - Raw command output: %q", rawOutput)
+
+	s := strings.TrimSpace(rawOutput)
+	logger.Debug("Posture check: Firewall - Trimmed output: %q", s)
+
+	result := s == "True"
+	logger.Debug("Posture check: Firewall - Result: %v", result)
+	return result
 }
 
 func windowsDefenderEnabled() bool {
-	cmd := exec.Command("sc", "query", "WinDefend")
+	// Query Windows Security Center for antivirus products
+	// Get productState values and check if any antivirus is active
+	command := "Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct | Select-Object -ExpandProperty productState"
+	logger.Debug("Posture check: Antivirus - Executing PowerShell command: %s", command)
+
+	cmd := exec.Command("powershell.exe", "-Command", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
+		logger.Debug("Posture check: Antivirus - Command failed with error: %v", err)
 		return false
 	}
 
-	return strings.Contains(string(out), "RUNNING")
-}
+	rawOutput := string(out)
+	logger.Debug("Posture check: Antivirus - Raw command output: %q", rawOutput)
 
-func windowsAutoUpdatesEnabled() bool {
-	key, err := registry.OpenKey(
-		registry.LOCAL_MACHINE,
-		`SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU`,
-		registry.QUERY_VALUE,
-	)
-	if err != nil {
-		// Key missing means updates are enabled
-		return true
+	// Parse output - may contain multiple productState values (one per line)
+	lines := strings.Split(strings.TrimSpace(rawOutput), "\n")
+	logger.Debug("Posture check: Antivirus - Found %d productState line(s)", len(lines))
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			logger.Debug("Posture check: Antivirus - Skipping empty line %d", i+1)
+			continue
+		}
+
+		logger.Debug("Posture check: Antivirus - Processing line %d: %q", i+1, line)
+
+		// Parse productState as integer
+		productState, err := strconv.ParseUint(line, 10, 32)
+		if err != nil {
+			logger.Debug("Posture check: Antivirus - Failed to parse productState %q as decimal: %v", line, err)
+			continue
+		}
+
+		logger.Debug("Posture check: Antivirus - Parsed productState (decimal): %d", productState)
+
+		// Convert decimal to hex (e.g., 397568 -> "61100", 401664 -> "62100")
+		hexStr := strconv.FormatUint(productState, 16)
+		logger.Debug("Posture check: Antivirus - Hex conversion (before padding): %q", hexStr)
+
+		// Pad with leading zeros to ensure 6 digits
+		// This ensures the 2nd and 3rd hex digits are always at positions 2-3
+		if len(hexStr) < 6 {
+			hexStr = strings.Repeat("0", 6-len(hexStr)) + hexStr
+		}
+		hexStr = strings.ToUpper(hexStr)
+		logger.Debug("Posture check: Antivirus - Hex string (after padding/uppercase): %q", hexStr)
+
+		if len(hexStr) < 4 {
+			logger.Debug("Posture check: Antivirus - Hex string too short, skipping")
+			continue
+		}
+
+		// Extract 2nd and 3rd hex digits of the original value
+		// After padding to 6 digits, the 2nd and 3rd digits are at positions 2-3 (0-indexed)
+		// Example: 397568 -> "61100" -> padded to "061100" -> positions 2-3 = "11"
+		// Example: 401664 -> "62100" -> padded to "062100" -> positions 2-3 = "21"
+		statusDigits := hexStr[2:4]
+		logger.Debug("Posture check: Antivirus - Status digits (2nd and 3rd hex): %q (from hex: %q)", statusDigits, hexStr)
+
+		// "10" or "11" = ACTIVE, "20" or "21" = INACTIVE/PASSIVE
+		if statusDigits == "10" || statusDigits == "11" {
+			logger.Debug("Posture check: Antivirus - Found ACTIVE antivirus (status: %q)", statusDigits)
+			return true
+		} else {
+			logger.Debug("Posture check: Antivirus - Antivirus is INACTIVE/PASSIVE (status: %q)", statusDigits)
+		}
 	}
-	defer key.Close()
 
-	val, _, err := key.GetIntegerValue("NoAutoUpdate")
-	if err != nil {
-		return true // Value missing means updates are enabled
-	}
-
-	return val != 1
-}
-
-func windowsTPMAvailable() bool {
-	cmd := exec.Command("sc", "query", "tpm")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	return strings.Contains(string(out), "RUNNING")
-}
-
-func windowsBiometricsEnabled() bool {
-	key, err := registry.OpenKey(
-		registry.LOCAL_MACHINE,
-		`SOFTWARE\Microsoft\Windows\CurrentVersion\Biometrics`,
-		registry.QUERY_VALUE,
-	)
-	if err != nil {
-		return false
-	}
-	defer key.Close()
-
-	val, _, err := key.GetIntegerValue("Enabled")
-	if err != nil {
-		return false
-	}
-
-	return val == 1
+	logger.Debug("Posture check: Antivirus - No active antivirus found, result: false")
+	return false
 }
 
 func (p *Fingerprint) ToMap() map[string]any {
