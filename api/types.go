@@ -83,6 +83,15 @@ type CreateOlmResponse struct {
 	Name   string `json:"name"`
 }
 
+type RecoverOlmRequest struct {
+	PlatformFingerprint string `json:"platformFingerprint"`
+}
+
+type RecoverOlmResponse struct {
+	OlmID  string `json:"olmId"`
+	Secret string `json:"secret"`
+}
+
 // GetOrgResponse represents the response for getting an organization
 type GetOrgResponse struct {
 	Id   string `json:"id"`
@@ -105,16 +114,16 @@ type OrgPolicies struct {
 
 // MaxSessionLength represents max session length policy
 type MaxSessionLength struct {
-	Compliant             bool `json:"compliant"`
-	MaxSessionLengthHours int  `json:"maxSessionLengthHours"`
-	SessionAgeHours       int  `json:"sessionAgeHours"`
+	Compliant             bool    `json:"compliant"`
+	MaxSessionLengthHours float32 `json:"maxSessionLengthHours"`
+	SessionAgeHours       float32 `json:"sessionAgeHours"`
 }
 
 // PasswordAge represents password age policy
 type PasswordAge struct {
-	Compliant          bool `json:"compliant"`
-	MaxPasswordAgeDays int  `json:"maxPasswordAgeDays"`
-	PasswordAgeDays    int  `json:"passwordAgeDays"`
+	Compliant          bool    `json:"compliant"`
+	MaxPasswordAgeDays float32 `json:"maxPasswordAgeDays"`
+	PasswordAgeDays    float32 `json:"passwordAgeDays"`
 }
 
 // GetClientResponse represents the response for getting a client
@@ -147,10 +156,11 @@ type ResponseOrg struct {
 
 // Olm represents an OLM (Online Management) record
 type Olm struct {
-	OlmId  string  `json:"olmId"`
-	UserId string  `json:"userId"`
-	Name   *string `json:"name,omitempty"`
-	Secret *string `json:"secret,omitempty"`
+	OlmId   string  `json:"olmId"`
+	UserId  string  `json:"userId"`
+	Name    *string `json:"name,omitempty"`
+	Secret  *string `json:"secret,omitempty"`
+	Blocked *bool   `json:"blocked,omitempty"`
 }
 
 // MyDeviceResponse represents the response for getting my device
@@ -158,4 +168,13 @@ type MyDeviceResponse struct {
 	User MyDeviceUser  `json:"user"`
 	Orgs []ResponseOrg `json:"orgs"`
 	Olm  *Olm          `json:"olm,omitempty"`
+}
+
+// ServerInfo represents server information including version, build type, and license status
+type ServerInfo struct {
+	Version                string  `json:"version"`
+	SupporterStatusValid   bool    `json:"supporterStatusValid"`
+	Build                  string  `json:"build"` // "oss", "enterprise", or "saas"
+	EnterpriseLicenseValid bool    `json:"enterpriseLicenseValid"`
+	EnterpriseLicenseType  *string `json:"enterpriseLicenseType,omitempty"`
 }

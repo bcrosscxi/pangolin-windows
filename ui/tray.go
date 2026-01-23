@@ -5,6 +5,7 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -44,6 +45,9 @@ var (
 	addAccountAction   *walk.Action
 	moreAction         *walk.Action
 	quitAction         *walk.Action
+	serverDownAction   *walk.Action
+	errorMessageAction *walk.Action
+	watermarkAction    *walk.Action
 	updateFoundCb      *managers.UpdateFoundCallback
 	updateProgressCb   *managers.UpdateProgressCallback
 	managerStoppingCb  *managers.ManagerStoppingCallback
@@ -148,6 +152,19 @@ func handleMenuOpen() {
 
 	// Run in background goroutine to avoid blocking menu
 	go func() {
+		// Health check before fetching user data
+		_ = authManager.CheckHealthAndSetState()
+
+		// Check if server is down
+		if authManager.IsServerDown() {
+			// Server is down, but keep UI visible
+			loggedOutMutex.Lock()
+			isLoggedOut = false
+			loggedOutMutex.Unlock()
+			updateMenu()
+			return
+		}
+
 		// First, try to get the user to verify session is still valid
 		user, err := apiClient.GetUser()
 		if err != nil {
@@ -162,6 +179,23 @@ func handleMenuOpen() {
 
 		// If successful, update user and clear logged out state
 		authManager.UpdateCurrentUser(user)
+
+		// Update account info with user data
+		if accountManager != nil {
+			activeAccount, _ := accountManager.ActiveAccount()
+			if activeAccount != nil && activeAccount.UserID == user.UserId {
+				var username string
+				if user.Username != nil {
+					username = *user.Username
+				}
+				var name string
+				if user.Name != nil {
+					name = *user.Name
+				}
+				_ = accountManager.UpdateAccountUserInfo(activeAccount.UserID, username, name)
+			}
+		}
+
 		loggedOutMutex.Lock()
 		isLoggedOut = false
 		loggedOutMutex.Unlock()
@@ -203,6 +237,19 @@ func setupMenu() error {
 	loadingAction.SetText("Loading...")
 	loadingAction.SetEnabled(false)
 	actions.Add(loadingAction)
+
+	// Create server down action (initially hidden)
+	serverDownAction = walk.NewAction()
+	serverDownAction.SetText("The server appears to be down.")
+	serverDownAction.SetEnabled(false)
+	serverDownAction.SetVisible(false)
+	actions.Add(serverDownAction)
+
+	// Create error message action (initially hidden)
+	errorMessageAction = walk.NewAction()
+	errorMessageAction.SetEnabled(false)
+	errorMessageAction.SetVisible(false)
+	actions.Add(errorMessageAction)
 
 	// Create status action
 	statusAction = walk.NewAction()
@@ -487,7 +534,16 @@ func setupMenu() error {
 	moreAction.SetText("More")
 	actions.Add(moreAction)
 
-	// Separator before Quit
+	// Separator before watermark/quit
+	actions.Add(walk.NewSeparatorAction())
+
+	// Create watermark action (initially hidden)
+	watermarkAction = walk.NewAction()
+	watermarkAction.SetEnabled(false)
+	watermarkAction.SetVisible(false)
+	actions.Add(watermarkAction)
+
+	// Separator before Quit (if watermark is shown, this will be after it)
 	actions.Add(walk.NewSeparatorAction())
 
 	// Create quit action
@@ -585,8 +641,68 @@ func updateMenu() {
 			loadingAction.SetVisible(isInitializing)
 		}
 
+		// Update server status messages
+		isServerDown := authManager != nil && authManager.IsServerDown()
+		errorMessage := authManager.ErrorMessage()
+		hasErrorMessage := errorMessage != nil && *errorMessage != "" && !isServerDown
+
+		if serverDownAction != nil {
+			serverDownAction.SetVisible(isAuthenticated && isServerDown && !isInitializing)
+		}
+		if errorMessageAction != nil {
+			if hasErrorMessage && isAuthenticated && !isInitializing {
+				errorMessageAction.SetText(*errorMessage)
+				errorMessageAction.SetVisible(true)
+			} else {
+				errorMessageAction.SetVisible(false)
+			}
+		}
+
+		// Update watermark message
+		if watermarkAction != nil {
+			serverInfo := authManager.ServerInfo()
+			var watermarkText string
+			shouldShow := false
+
+			if serverInfo != nil && isAuthenticated && !isInitializing {
+				build := serverInfo.Build
+				enterpriseLicenseValid := serverInfo.EnterpriseLicenseValid
+				enterpriseLicenseType := serverInfo.EnterpriseLicenseType
+				supporterStatusValid := serverInfo.SupporterStatusValid
+
+				// Enterprise + Personal License
+				if build == "enterprise" && enterpriseLicenseType != nil {
+					licenseType := strings.ToLower(*enterpriseLicenseType)
+					if licenseType == "personal" {
+						watermarkText = "Licensed for personal use only."
+						shouldShow = true
+					}
+				}
+
+				// Enterprise + Unlicensed
+				if !shouldShow && build == "enterprise" && !enterpriseLicenseValid {
+					watermarkText = "This server is unlicensed."
+					shouldShow = true
+				}
+
+				// OSS + No Supporter Key
+				if !shouldShow && build == "oss" && !supporterStatusValid {
+					watermarkText = "Community Edition. Consider supporting."
+					shouldShow = true
+				}
+			}
+
+			if shouldShow {
+				watermarkAction.SetText(watermarkText)
+				watermarkAction.SetVisible(true)
+			} else {
+				watermarkAction.SetVisible(false)
+			}
+		}
+
 		// Update authenticated section visibility
 		// Show full auth section if: authenticated and not logged out
+		// Show even if server is down to allow account switching/logout
 		showAuthSection := isAuthenticated && !isLoggedOutLocal && !isInitializing
 
 		if statusAction != nil {
@@ -755,11 +871,12 @@ func updateAccountMenu() {
 			// Create new action
 			action = walk.NewAction()
 
+			displayName := auth.AccountDisplayName(&account)
 			var accountText string
 			if emailCounts[account.Email] > 1 {
-				accountText = fmt.Sprintf("%s (%s)", account.Email, account.Hostname)
+				accountText = fmt.Sprintf("%s (%s)", displayName, account.Hostname)
 			} else {
-				accountText = account.Email
+				accountText = displayName
 			}
 
 			action.SetText(accountText)
@@ -815,11 +932,12 @@ func updateAccountMenu() {
 			actions.Insert(2, action)
 		} else {
 			// Update existing action
+			displayName := auth.AccountDisplayName(&account)
 			var accountText string
 			if emailCounts[account.Email] > 1 {
-				accountText = fmt.Sprintf("%s (%s)", account.Email, account.Hostname)
+				accountText = fmt.Sprintf("%s (%s)", displayName, account.Hostname)
 			} else {
-				accountText = account.Email
+				accountText = displayName
 			}
 			action.SetText(accountText)
 		}
@@ -886,11 +1004,7 @@ func updateAccountMenu() {
 	// Update accounts menu action text
 	accountMenuActionText := "Select Account"
 	if currentAccount != nil {
-		if emailCounts[currentAccount.Email] > 1 {
-			accountMenuActionText = fmt.Sprintf("%s (%s)", currentAccount.Email, currentAccount.Hostname)
-		} else {
-			accountMenuActionText = currentAccount.Email
-		}
+		accountMenuActionText = auth.AccountDisplayName(currentAccount)
 	}
 	accountMenuAction.SetText(accountMenuActionText)
 	accountMenuAction.SetVisible(len(accounts) > 0)
@@ -1073,7 +1187,13 @@ func updateLoginAction() {
 	if isAuthenticated {
 		activeAccount, _ := accountManager.ActiveAccount()
 		if activeAccount != nil {
-			loginAction.SetText(activeAccount.Email)
+			// Use display name helper, but prefer currentUser if available
+			user := authManager.CurrentUser()
+			if user != nil {
+				loginAction.SetText(auth.UserDisplayName(user))
+			} else {
+				loginAction.SetText(auth.AccountDisplayName(activeAccount))
+			}
 		} else {
 			loginAction.SetText("Select Account")
 		}
@@ -1306,6 +1426,25 @@ func SetupTray(
 
 			// Update menu to update status text and connect button
 			updateMenu()
+		})
+	})
+
+	// Register for tunnel error notifications via tunnel manager
+	tunnelManager.RegisterErrorCallback(func(err *tunnel.OLMStatusError) {
+		logger.Error("Tunnel error detected: code=%s, message=%s", err.Code, err.Message)
+		walk.App().Synchronize(func() {
+			td := walk.NewTaskDialog()
+			errorMessage := err.Message
+			if errorMessage == "" {
+				errorMessage = fmt.Sprintf("Error code: %s", err.Code)
+			}
+			_, _ = td.Show(walk.TaskDialogOpts{
+				Owner:         mainWindow,
+				Title:         "Connection Error",
+				Content:       errorMessage,
+				IconSystem:    walk.TaskDialogSystemIconError,
+				CommonButtons: win.TDCBF_OK_BUTTON,
+			})
 		})
 	})
 

@@ -149,6 +149,22 @@ func (m *AccountManager) SetUserOrganization(userID string, orgID string) error 
 
 	if account, ok := m.Accounts[userID]; ok {
 		account.OrgID = orgID
+		m.Accounts[userID] = account // Put the modified account back in the map
+	} else {
+		return errors.New("account does not exist")
+	}
+
+	return m.saveLocked()
+}
+
+func (m *AccountManager) UpdateAccountUserInfo(userID, username, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if account, ok := m.Accounts[userID]; ok {
+		account.Username = username
+		account.Name = name
+		m.Accounts[userID] = account // Put the modified account back in the map
 	} else {
 		return errors.New("account does not exist")
 	}

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/fosrl/windows/version"
 )
 
 // Login authenticates a user with email and password
@@ -125,6 +127,31 @@ func (c *APIClient) GetUser() (*User, error) {
 	return &user, nil
 }
 
+// RecoverOlmFromFingerprint recovers a user's OLM credentials from
+// a fingerprint.
+func (c *APIClient) RecoverOlmFromFingerprint(userID string, platformFingerprint string) (*RecoverOlmResponse, error) {
+	path := fmt.Sprintf("/user/%s/olm/recover", userID)
+	requestBody := RecoverOlmRequest{
+		PlatformFingerprint: platformFingerprint,
+	}
+	bodyData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, &APIError{Type: ErrorTypeDecodingError, Err: err}
+	}
+
+	data, resp, err := c.makeRequest("POST", path, bodyData)
+	if err != nil {
+		return nil, err
+	}
+
+	var newOlmCreds RecoverOlmResponse
+	if err := c.parseResponse(data, resp, &newOlmCreds); err != nil {
+		return nil, err
+	}
+
+	return &newOlmCreds, nil
+}
+
 // ListUserOrgs lists organizations for a user
 func (c *APIClient) ListUserOrgs(userId string) (*ListUserOrgsResponse, error) {
 	path := fmt.Sprintf("/user/%s/orgs", userId)
@@ -167,8 +194,17 @@ func (c *APIClient) CreateOlm(userId, name string) (*CreateOlmResponse, error) {
 }
 
 // GetUserOlm gets an OLM for a user by userId and olmId
-func (c *APIClient) GetUserOlm(userId, olmId string) (*Olm, error) {
+// orgId is optional and will be included as a query parameter if provided
+func (c *APIClient) GetUserOlm(userId, olmId string, orgId *string) (*Olm, error) {
 	path := fmt.Sprintf("/user/%s/olm/%s", userId, olmId)
+
+	// Build query parameters if orgId is provided
+	if orgId != nil && *orgId != "" {
+		params := url.Values{}
+		params.Set("orgId", *orgId)
+		path = fmt.Sprintf("%s?%s", path, params.Encode())
+	}
+
 	data, resp, err := c.makeRequest("GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -264,7 +300,7 @@ func (c *APIClient) TestConnection() (bool, error) {
 		return false, &APIError{Type: ErrorTypeInvalidURL, Err: err}
 	}
 
-	req.Header.Set("User-Agent", c.agentName)
+	req.Header.Set("User-Agent", version.UserAgent())
 
 	resp, err := testClient.Do(req)
 	if err != nil {
@@ -274,4 +310,39 @@ func (c *APIClient) TestConnection() (bool, error) {
 
 	// Consider 200-299 and 404 as successful connection
 	return (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == 404, nil
+}
+
+// GetServerInfo gets server information including version, build type, and license status
+func (c *APIClient) GetServerInfo() (*ServerInfo, error) {
+	data, resp, err := c.makeRequest("GET", "/server-info", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var serverInfo ServerInfo
+	if err := c.parseResponse(data, resp, &serverInfo); err != nil {
+		return nil, err
+	}
+
+	return &serverInfo, nil
+}
+
+// CheckHealth checks if the server is reachable and responding
+// Returns true if status is 200-299, 401, or 403 (server is up)
+// Returns false if server is unreachable or returns other error status
+func (c *APIClient) CheckHealth() (bool, error) {
+	_, resp, err := c.makeRequest("GET", "", nil)
+	if err != nil {
+		// Network error means server is down
+		return false, nil
+	}
+
+	// Server is up if status is 200-299, 401, or 403
+	statusCode := resp.StatusCode
+	if (statusCode >= 200 && statusCode < 300) || statusCode == 401 || statusCode == 403 {
+		return true, nil
+	}
+
+	// Other status codes mean server is down or error
+	return false, nil
 }

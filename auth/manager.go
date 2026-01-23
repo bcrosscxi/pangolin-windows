@@ -12,6 +12,7 @@ import (
 
 	"github.com/fosrl/windows/api"
 	"github.com/fosrl/windows/config"
+	"github.com/fosrl/windows/fingerprint"
 	"github.com/fosrl/windows/secrets"
 
 	"github.com/fosrl/newt/logger"
@@ -63,6 +64,8 @@ type AuthManager struct {
 	errorMessage       *string
 	deviceAuthCode     *string
 	deviceAuthLoginURL *string
+	serverInfo         *api.ServerInfo
+	isServerDown       bool
 }
 
 // NewAuthManager creates a new AuthManager instance
@@ -98,7 +101,23 @@ func (am *AuthManager) Initialize() error {
 		// Load session token from Keychain
 		token, found := am.secretManager.GetSessionToken(activeAccount.UserID)
 		if found && token != "" {
+			am.apiClient.UpdateBaseURL(activeAccount.Hostname)
 			am.apiClient.UpdateSessionToken(token)
+
+			// Health check before fetching user/orgs
+			_ = am.CheckHealthAndSetState()
+
+			am.mu.RLock()
+			serverDown := am.isServerDown
+			am.mu.RUnlock()
+
+			if serverDown {
+				// Server is down, but keep authenticated state to show UI
+				am.mu.Lock()
+				am.isAuthenticated = true
+				am.mu.Unlock()
+				return nil
+			}
 
 			// Always fetch the latest user info to verify the user exists and update stored info
 			user, err := am.apiClient.GetUser()
@@ -109,6 +128,17 @@ func (am *AuthManager) Initialize() error {
 				am.mu.Unlock()
 				return nil // Not an error, just not authenticated
 			}
+
+			// Update account info with user data
+			var username string
+			if user.Username != nil {
+				username = *user.Username
+			}
+			var name string
+			if user.Name != nil {
+				name = *user.Name
+			}
+			_ = am.accountManager.UpdateAccountUserInfo(activeAccount.UserID, username, name)
 
 			// Update stored config with latest user info
 			return am.handleSuccessfulAuth(user, activeAccount.Hostname, token)
@@ -247,7 +277,9 @@ func (am *AuthManager) LoginWithDeviceAuth(ctx context.Context, hostnameOverride
 // Returns the selected organization's ID.
 // This does NOT get persisted to the account store; callers
 // persist it to the account store themselves.
-func (am *AuthManager) ensureOrgIsSelected() string {
+// If account is provided, it will use that account's stored org ID.
+// Otherwise, it will use the active account's stored org ID.
+func (am *AuthManager) ensureOrgIsSelected(account *config.Account) string {
 	var selectedOrgID string
 
 	am.mu.RLock()
@@ -268,9 +300,21 @@ func (am *AuthManager) ensureOrgIsSelected() string {
 
 		// Restore last selected org from config,
 		// or auto-select a random one.
-		if activeAccount, _ := am.accountManager.ActiveAccount(); activeAccount != nil {
+		var accountToUse *config.Account
+		if account != nil {
+			// Use the provided account (e.g., when switching accounts)
+			accountToUse = account
+		} else {
+			// Fall back to active account (e.g., during initial login)
+			if activeAccount, _ := am.accountManager.ActiveAccount(); activeAccount != nil {
+				accountToUse = activeAccount
+			}
+		}
+
+		if accountToUse != nil && accountToUse.OrgID != "" {
+			// Try to restore the last selected org for this account
 			for _, org := range orgsResponse.Orgs {
-				if org.Id == activeAccount.OrgID {
+				if org.Id == accountToUse.OrgID {
 					am.mu.Lock()
 					am.currentOrg = &org
 					selectedOrgID = am.currentOrg.Id
@@ -278,7 +322,11 @@ func (am *AuthManager) ensureOrgIsSelected() string {
 					break
 				}
 			}
-		} else if len(orgsResponse.Orgs) > 0 {
+		}
+
+		// If no org was selected (either no stored org ID or stored org no longer exists),
+		// auto-select the first available org
+		if selectedOrgID == "" && len(orgsResponse.Orgs) > 0 {
 			am.mu.Lock()
 			am.currentOrg = &orgsResponse.Orgs[0]
 			selectedOrgID = am.currentOrg.Id
@@ -301,15 +349,15 @@ func (am *AuthManager) handleSuccessfulAuth(user *api.User, hostname string, tok
 
 	am.UpdateCurrentUser(user)
 
-	selectedOrgID := am.ensureOrgIsSelected()
+	// Check if account already exists to use its stored org ID
+	var existingAccount *config.Account
+	if existingAcc, exists := am.accountManager.Accounts[user.UserId]; exists {
+		existingAccount = &existingAcc
+	}
+
+	selectedOrgID := am.ensureOrgIsSelected(existingAccount)
 
 	_ = am.secretManager.SaveSessionToken(user.UserId, token)
-
-	// Ensure OLM credentials exist for this device-account combo
-	if err := am.EnsureOlmCredentials(user.UserId); err != nil {
-		logger.Error("Failed to ensure OLM credentials: %v", err)
-		// Non-fatal, continue
-	}
 
 	var username string
 	if user.Username != nil {
@@ -336,6 +384,10 @@ func (am *AuthManager) handleSuccessfulAuth(user *api.User, hostname string, tok
 	am.mu.Lock()
 	am.isAuthenticated = true
 	am.mu.Unlock()
+
+	// Fetch server info after successful authentication
+	_ = am.fetchServerInfo()
+
 	return nil
 }
 
@@ -583,7 +635,7 @@ func (am *AuthManager) EnsureOlmCredentials(userId string) error {
 		// Verify OLM exists on server by getting the OLM directly
 		olmIdString, found := am.secretManager.GetOlmId(userId)
 		if found {
-			olm, err := am.apiClient.GetUserOlm(userId, olmIdString)
+			olm, err := am.apiClient.GetUserOlm(userId, olmIdString, nil)
 			if err == nil && olm != nil {
 				// Verify the olmId matches
 				if olm.OlmId == olmIdString {
@@ -603,76 +655,109 @@ func (am *AuthManager) EnsureOlmCredentials(userId string) error {
 		}
 	}
 
-	// If credentials don't exist or were cleared, create new ones
-	if !am.secretManager.HasOlmCredentials(userId) {
-		// Get friendly device name (e.g., "Windows Laptop" or "Windows Desktop")
-		deviceName := config.GetFriendlyDeviceName()
+	fp := fingerprint.GatherFingerprintInfo()
 
-		olmResponse, err := am.apiClient.CreateOlm(userId, deviceName)
-		if err != nil {
-			return fmt.Errorf("failed to create OLM: %w", err)
-		}
-
-		// Save OLM credentials
-		saved := am.secretManager.SaveOlmCredentials(userId, olmResponse.OlmId, olmResponse.Secret)
+	// First, attempt to recover the credentials and associate it with
+	// an existing device.
+	recoveredCreds, err := am.apiClient.RecoverOlmFromFingerprint(userId, fp.PlatformFingerprint)
+	if err == nil {
+		saved := am.secretManager.SaveOlmCredentials(userId, recoveredCreds.OlmID, recoveredCreds.Secret)
 		if !saved {
 			return errors.New("failed to save OLM credentials")
 		}
+
+		return nil
+	}
+
+	// If credentials don't exist or were cleared, create new ones
+	// Get friendly device name (e.g., "Windows Laptop" or "Windows Desktop")
+	deviceName := config.GetFriendlyDeviceName()
+
+	olmResponse, err := am.apiClient.CreateOlm(userId, deviceName)
+	if err != nil {
+		return fmt.Errorf("failed to create OLM: %w", err)
+	}
+
+	// Save OLM credentials
+	saved := am.secretManager.SaveOlmCredentials(userId, olmResponse.OlmId, olmResponse.Secret)
+	if !saved {
+		return errors.New("failed to save OLM credentials")
 	}
 
 	return nil
 }
 
 func (am *AuthManager) SwitchAccount(userID string) error {
-	am.mu.Lock()
-	am.isAuthenticated = false
-	am.mu.Unlock()
-
-	defer func() {
-		am.mu.Lock()
-		am.isAuthenticated = true
-		am.mu.Unlock()
-	}()
-
 	accountToSwitchTo, exists := am.accountManager.Accounts[userID]
 	if !exists {
 		return errors.New("account does not exist")
 	}
 
 	token, found := am.secretManager.GetSessionToken(accountToSwitchTo.UserID)
-	if found && token != "" {
-		am.apiClient.UpdateBaseURL(accountToSwitchTo.Hostname)
-		am.apiClient.UpdateSessionToken(token)
-
-		// Always fetch the latest user info to verify the user exists and update stored info
-		var err error
-		user, err := am.apiClient.GetUser()
-		if err != nil {
-			// This should never happen, but if it does, silently
-			// fail and switch to an unauthenticated state to prevent
-			// any more unreachable situations from happening.
-			am.mu.Lock()
-			am.isAuthenticated = false
-			am.mu.Unlock()
-			return nil
-		}
-
-		am.UpdateCurrentUser(user)
-	} else {
+	if !found || token == "" {
 		return errors.New("session token does not exist for this user")
 	}
 
-	selectedOrgID := am.ensureOrgIsSelected()
+	// Step 1: Switch locally first (optimistic switch)
+	_ = am.accountManager.SetActiveUser(userID)
+	am.apiClient.UpdateBaseURL(accountToSwitchTo.Hostname)
+	am.apiClient.UpdateSessionToken(token)
 
-	err := am.accountManager.SetUserOrganization(userID, selectedOrgID)
-	if err != nil {
-		logger.Warn("failed to set user's org ID in accounts store: %v", err)
+	// Step 2: Clear user data immediately
+	am.mu.Lock()
+	am.currentUser = nil
+	am.currentOrg = nil
+	am.organizations = []api.Org{}
+	am.serverInfo = nil // Clear server info to avoid showing stale data
+	am.isAuthenticated = true
+	am.isServerDown = false
+	am.errorMessage = nil
+	am.mu.Unlock()
+
+	// Step 3: Validate with server (health check, fetch user, select org, fetch server info)
+	_ = am.CheckHealthAndSetState()
+
+	am.mu.RLock()
+	serverDown := am.isServerDown
+	am.mu.RUnlock()
+
+	if serverDown {
+		// Server is down, but account is switched - show error but don't revert
+		logger.Warn("Server appears to be down after account switch")
+		return nil
 	}
 
-	err = am.accountManager.SetActiveUser(userID)
+	// Fetch user data
+	user, err := am.apiClient.GetUser()
 	if err != nil {
-		logger.Warn("failed to set active user in accounts store: %v", err)
+		// Show error but don't revert switch
+		am.mu.Lock()
+		msg := err.Error()
+		am.errorMessage = &msg
+		am.mu.Unlock()
+		logger.Error("Failed to fetch user after account switch: %v", err)
+		return nil
 	}
+
+	// Update account info with user data
+	var username string
+	if user.Username != nil {
+		username = *user.Username
+	}
+	var name string
+	if user.Name != nil {
+		name = *user.Name
+	}
+	_ = am.accountManager.UpdateAccountUserInfo(userID, username, name)
+
+	am.UpdateCurrentUser(user)
+
+	// Select organization
+	selectedOrgID := am.ensureOrgIsSelected(&accountToSwitchTo)
+	_ = am.accountManager.SetUserOrganization(userID, selectedOrgID)
+
+	// Fetch server info
+	_ = am.fetchServerInfo()
 
 	return nil
 }
@@ -683,6 +768,16 @@ func (am *AuthManager) Logout() error {
 	_ = am.apiClient.Logout()
 
 	userID := am.accountManager.ActiveUserID
+
+	// Get all accounts before removing the current one
+	// We need to find the next available account to switch to
+	var nextAccountID string
+	for accountID := range am.accountManager.Accounts {
+		if accountID != userID {
+			nextAccountID = accountID
+			break
+		}
+	}
 
 	// Clear local data
 	am.apiClient.UpdateSessionToken("")
@@ -697,8 +792,67 @@ func (am *AuthManager) Logout() error {
 	am.mu.Unlock()
 
 	_ = am.secretManager.DeleteSessionToken(userID)
+	// for backward compatibility with old servers so we dont recreate the olm
+	// we are keeping this commented out for now so we dont remove the olm 
+	// _ = am.secretManager.DeleteOlmCredentials(userID)
 
 	_ = am.accountManager.RemoveAccount(userID)
+
+	// Auto-select next available account if one exists
+	if nextAccountID != "" {
+		// Check if the account still exists (it should, since we got it before removal)
+		_, exists := am.accountManager.Accounts[nextAccountID]
+		if exists {
+			// Switch to the next available account
+			if err := am.SwitchAccount(nextAccountID); err != nil {
+				logger.Warn("Failed to auto-switch to next account after logout: %v", err)
+				// Don't return error - logout was successful, auto-switch is just a convenience
+			}
+		}
+	}
+
+	return nil
+}
+
+// CheckHealthAndSetState performs a health check and updates the server down state
+func (am *AuthManager) CheckHealthAndSetState() error {
+	healthy, err := am.apiClient.CheckHealth()
+	if err != nil {
+		// Network error means server is down
+		am.mu.Lock()
+		am.isServerDown = true
+		msg := "The server appears to be down."
+		am.errorMessage = &msg
+		am.mu.Unlock()
+		return err
+	}
+
+	am.mu.Lock()
+	if !healthy {
+		am.isServerDown = true
+		msg := "The server appears to be down."
+		am.errorMessage = &msg
+	} else {
+		am.isServerDown = false
+		am.errorMessage = nil
+	}
+	am.mu.Unlock()
+
+	return nil
+}
+
+// fetchServerInfo fetches and stores server information
+func (am *AuthManager) fetchServerInfo() error {
+	serverInfo, err := am.apiClient.GetServerInfo()
+	if err != nil {
+		// Non-fatal error, just log it
+		logger.Error("Failed to fetch server info: %v", err)
+		return err
+	}
+
+	am.mu.Lock()
+	am.serverInfo = serverInfo
+	am.mu.Unlock()
 
 	return nil
 }
@@ -753,6 +907,18 @@ func (am *AuthManager) DeviceAuthLoginURL() *string {
 	return am.deviceAuthLoginURL
 }
 
+func (am *AuthManager) ServerInfo() *api.ServerInfo {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.serverInfo
+}
+
+func (am *AuthManager) IsServerDown() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.isServerDown
+}
+
 // ClearDeviceAuth clears the device authentication code and URL
 func (am *AuthManager) ClearDeviceAuth() {
 	am.mu.Lock()
@@ -766,6 +932,11 @@ func (am *AuthManager) UpdateCurrentUser(user *api.User) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 	am.currentUser = user
+}
+
+// APIClient returns a reference to the API client
+func (am *AuthManager) APIClient() *api.APIClient {
+	return am.apiClient
 }
 
 // Helper function

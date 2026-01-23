@@ -19,6 +19,5 @@ func Arch() string {
 }
 
 func UserAgent() string {
-	return fmt.Sprintf("Pangolin/%s (%s; %s)", Number, OsName(), Arch())
+	return fmt.Sprintf("pangolin-windows-%s", Number)
 }
-

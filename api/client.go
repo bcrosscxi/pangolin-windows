@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/windows/version"
 )
 
 // APIError represents an error from the API client
@@ -72,7 +73,6 @@ type APIClient struct {
 	sessionToken      string
 	sessionCookieName string
 	csrfToken         string
-	agentName         string
 	client            *http.Client
 }
 
@@ -89,7 +89,6 @@ func NewAPIClient(baseURL string, sessionToken string) *APIClient {
 		sessionToken:      sessionToken,
 		sessionCookieName: "p_session_token",
 		csrfToken:         "x-csrf-protection",
-		agentName:         "pangolin-windows",
 		client:            client,
 	}
 
@@ -175,7 +174,7 @@ func (c *APIClient) makeRequest(method, path string, body []byte) ([]byte, *http
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.agentName)
+	req.Header.Set("User-Agent", version.UserAgent())
 	req.Header.Set("X-CSRF-Token", c.csrfToken)
 
 	// Add session cookie if available

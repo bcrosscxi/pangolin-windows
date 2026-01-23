@@ -63,6 +63,7 @@ type OLMStatusTab struct {
 	formattedContainer *walk.Composite
 	statusContainer    *walk.Composite
 	peersContainer     *walk.Composite
+	noSitesLabel       *walk.Label
 
 	// Widget references for updating (protected by mu)
 	statusWidgets *statusWidgets
@@ -144,10 +145,18 @@ func (ost *OLMStatusTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) {
 	if err != nil {
 		return nil, err
 	}
-	peersSectionLabel.SetText("Peers")
+	peersSectionLabel.SetText("Sites")
 	if font, err := walk.NewFont("Segoe UI", 10, walk.FontBold); err == nil {
 		peersSectionLabel.SetFont(font)
 	}
+
+	// No sites connected label (initially visible)
+	// Place directly in formattedContainer to align with "Sites" header
+	if ost.noSitesLabel, err = walk.NewLabel(ost.formattedContainer); err != nil {
+		return nil, err
+	}
+	ost.noSitesLabel.SetText("No sites connected")
+	ost.noSitesLabel.SetTextColor(walk.RGB(100, 100, 100))
 
 	// Peers container
 	if ost.peersContainer, err = walk.NewComposite(ost.formattedContainer); err != nil {
@@ -529,7 +538,16 @@ func (ost *OLMStatusTab) updatePeersList(status *tunnel.OLMStatusResponse) {
 			}
 		}
 		ost.mu.Unlock()
+		// Show "No sites connected" message
+		if ost.noSitesLabel != nil {
+			ost.noSitesLabel.SetVisible(true)
+		}
 		return
+	}
+
+	// Hide "No sites connected" message when there are peers
+	if ost.noSitesLabel != nil {
+		ost.noSitesLabel.SetVisible(false)
 	}
 
 	// Track which peers we've seen and which need to be created

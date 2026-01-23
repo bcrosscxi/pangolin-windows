@@ -3,9 +3,11 @@
 package tunnel
 
 import (
+	"context"
 	"time"
 
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/olm/olm"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -21,6 +23,11 @@ func RunTunnelService(configJSON string) error {
 
 type tunnelService struct {
 	configJSON string
+
+	olm *olm.Olm
+
+	fingerprintCtx    context.Context
+	fingerprintCancel context.CancelFunc
 }
 
 func (s *tunnelService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (svcSpecificEC bool, exitCode uint32) {
@@ -40,7 +47,7 @@ func (s *tunnelService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
 	// Build and start the tunnel
-	if err := buildTunnel(config); err != nil {
+	if err := s.buildTunnel(config); err != nil {
 		logger.Error("Tunnel service: Failed to build tunnel: %v", err)
 		SetState(StateStopped)
 		notifyStateChange(StateStopped)
@@ -48,36 +55,32 @@ func (s *tunnelService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 	}
 
 	// Handle service control requests
-	for {
-		select {
-		case c, ok := <-r:
-			if !ok {
-				// Channel closed, exit service
-				// Perform cleanup before exiting (unexpected channel close)
-				logger.Info("Tunnel service: Service control channel closed")
-				destroyTunnel(config)
-				return false, 0
-			}
-			switch c.Cmd {
-			case svc.Interrogate:
-				changes <- c.CurrentStatus
-				time.Sleep(100 * time.Millisecond)
-				changes <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
-				logger.Info("Tunnel service: Service stopping")
-				SetState(StateStopping)
-				notifyStateChange(StateStopping)
-				changes <- svc.Status{State: svc.StopPending}
+	for c := range r {
+		switch c.Cmd {
+		case svc.Interrogate:
+			changes <- c.CurrentStatus
+			time.Sleep(100 * time.Millisecond)
+			changes <- c.CurrentStatus
+		case svc.Stop, svc.Shutdown:
+			logger.Info("Tunnel service: Service stopping")
+			SetState(StateStopping)
+			notifyStateChange(StateStopping)
+			changes <- svc.Status{State: svc.StopPending}
 
-				// Destroy the tunnel (cleanup)
-				destroyTunnel(config)
+			// Destroy the tunnel (cleanup)
+			s.destroyTunnel(config)
 
-				SetState(StateStopped)
-				notifyStateChange(StateStopped)
-				return false, 0
-			default:
-				logger.Info("Tunnel service: Unexpected control request: %d", c.Cmd)
-			}
+			SetState(StateStopped)
+			notifyStateChange(StateStopped)
+			return false, 0
+		default:
+			logger.Info("Tunnel service: Unexpected control request: %d", c.Cmd)
 		}
 	}
+
+	// Channel closed, exit service
+	// Perform cleanup before exiting (unexpected channel close)
+	logger.Info("Tunnel service: Service control channel closed")
+	s.destroyTunnel(config)
+	return false, 0
 }

@@ -36,6 +36,7 @@ type Manager struct {
 	currentState   State
 	isConnected    bool
 	stateCallback  func(State)
+	errorCallback  func(*OLMStatusError)
 	unregisterCb   func()
 	ipcClient      IPCClient
 	authManager    *auth.AuthManager
@@ -128,6 +129,13 @@ func (tm *Manager) RegisterStateChangeCallback(cb func(State)) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.stateCallback = cb
+}
+
+// RegisterErrorCallback registers a callback that will be called when an error is detected in OLM status
+func (tm *Manager) RegisterErrorCallback(cb func(*OLMStatusError)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.errorCallback = cb
 }
 
 // buildConfig builds the tunnel configuration from auth manager, config manager, and secret manager
@@ -250,25 +258,6 @@ func (tm *Manager) Connect() error {
 		)
 	}
 
-	// Check org access before connecting
-	hasAccess, err := tm.authManager.CheckOrgAccess(currentOrg.Id)
-	if err != nil {
-		logger.Error("Failed to check org access: %v", err)
-		return formatConnectionError(
-			"Access Check Failed",
-			fmt.Sprintf("Failed to verify access to the organization: %v", err),
-			err,
-		)
-	}
-	if !hasAccess {
-		logger.Error("Access denied for org %s, aborting connection", currentOrg.Id)
-		return formatConnectionError(
-			"Access Denied",
-			"You do not have access to the selected organization.",
-			nil,
-		)
-	}
-
 	// Ensure OLM credentials exist before connecting
 	currentUser := tm.authManager.CurrentUser()
 	if currentUser != nil && currentUser.UserId != "" {
@@ -376,6 +365,12 @@ func (tm *Manager) Disconnect() error {
 	return nil
 }
 
+// OLMStatusError represents an error in the OLM status response
+type OLMStatusError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 // OLMStatusResponse represents the status response from OLM API
 type OLMStatusResponse struct {
 	Connected       bool                   `json:"connected"`
@@ -386,6 +381,7 @@ type OLMStatusResponse struct {
 	OrgID           string                 `json:"orgId,omitempty"`
 	PeerStatuses    map[int]*OLMPeerStatus `json:"peers,omitempty"`
 	NetworkSettings map[string]interface{} `json:"networkSettings,omitempty"`
+	Error           *OLMStatusError        `json:"error,omitempty"`
 }
 
 // OLMPeerStatus represents the status of a peer connection
@@ -557,6 +553,31 @@ func (tm *Manager) StartStatusPolling() {
 					continue
 				}
 
+				// This should be checked before checking termination or state updates
+				if status.Error != nil {
+					// Get current state to verify we're still in registration phase
+					tm.mu.RLock()
+					currentState := tm.currentState
+					tm.mu.RUnlock()
+
+					// Only handle errors during registration phase (not yet fully connected)
+					if currentState != StateRunning {
+						logger.Error("OLM status indicates error during registration: code=%s, message=%s", status.Error.Code, status.Error.Message)
+						// Stop the tunnel immediately
+						if err := tm.Disconnect(); err != nil {
+							logger.Error("Failed to disconnect tunnel after error: %v", err)
+						}
+						// Notify UI of the error
+						tm.mu.Lock()
+						errorCb := tm.errorCallback
+						tm.mu.Unlock()
+						if errorCb != nil {
+							errorCb(status.Error)
+						}
+						continue
+					}
+				}
+
 				// If terminated, disconnect the tunnel
 				if status.Terminated {
 					logger.Info("OLM status indicates terminated, disconnecting tunnel")
@@ -567,9 +588,9 @@ func (tm *Manager) StartStatusPolling() {
 				}
 
 				// Update tunnel state based on OLM status
-				// Connected takes precedence over Registered
+				// Only consider connected if both registered and connected
 				var newState State
-				if status.Connected {
+				if status.Connected && status.Registered {
 					newState = StateRunning
 				} else if status.Registered {
 					newState = StateRegistered
