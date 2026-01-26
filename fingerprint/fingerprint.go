@@ -119,17 +119,21 @@ func getWindowsVersion() (string, string) {
 
 	_, _, _ = proc.Call(uintptr(unsafe.Pointer(&info)))
 
-	osVersion := strings.TrimSpace(
-		strings.Join([]string{
-			"Windows",
-			strconv.FormatUint(uint64(info.dwMajorVersion), 10),
-			strconv.FormatUint(uint64(info.dwMinorVersion), 10),
-			"Build",
-			strconv.FormatUint(uint64(info.dwBuildNumber), 10),
-		}, " "),
+	marketingName := "Windows 10"
+	if info.dwMajorVersion == 10 && info.dwBuildNumber >= 22000 {
+		marketingName = "Windows 11"
+	} else if info.dwMajorVersion < 10 {
+		marketingName = fmt.Sprintf("Windows %d", info.dwMajorVersion)
+	}
+
+	osVersionFull := fmt.Sprintf("%s (%d.%d.%d)",
+		marketingName,
+		info.dwMajorVersion,
+		info.dwMinorVersion,
+		info.dwBuildNumber,
 	)
 
-	return osVersion, osVersion
+	return osVersionFull, osVersionFull
 }
 
 func getWindowsModelAndSerial() (string, string) {
