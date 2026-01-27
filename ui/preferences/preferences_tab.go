@@ -87,7 +87,7 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	if err != nil {
 		return nil, err
 	}
-	dnsOverrideLabel.SetText("DNS Override")
+	dnsOverrideLabel.SetText("Enable Aliases (DNS Override)")
 	dnsOverrideLabel.SetMinMaxSize(walk.Size{Width: 200, Height: 0}, walk.Size{Width: 200, Height: 0})
 
 	// DNS Override checkbox
@@ -105,7 +105,7 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	if err != nil {
 		return nil, err
 	}
-	descLabel.SetText("When enabled, the tunnel uses custom DNS servers to resolve internal resources and aliases. External queries use your configured upstream DNS.")
+	descLabel.SetText("When enabled, the client uses custom DNS servers to resolve internal resources and aliases. This overrides your system’s default DNS settings. Queries that cannot be resolved as a Pangolin resource will be forwarded to your configured Upstream DNS Server.")
 	descLabel.SetTextColor(walk.RGB(100, 100, 100))
 
 	// DNS Tunnel section
@@ -133,7 +133,7 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	if err != nil {
 		return nil, err
 	}
-	dnsTunnelLabel.SetText("DNS Tunnel")
+	dnsTunnelLabel.SetText("DNS Over Tunnel")
 	dnsTunnelLabel.SetMinMaxSize(walk.Size{Width: 200, Height: 0}, walk.Size{Width: 200, Height: 0})
 
 	// DNS Tunnel checkbox
@@ -151,7 +151,7 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	if err != nil {
 		return nil, err
 	}
-	dnsTunnelDescLabel.SetText("When enabled, DNS queries are sent through the tunnel to a resource. A private resource must be created for the address for it to work and resolve to the correct site.")
+	dnsTunnelDescLabel.SetText("When enabled, DNS queries are routed through the tunnel for remote resolution. To ensure queries are tunneled correctly, you must define the DNS server as a Pangolin resource and enter its address as an Upstream DNS Server.")
 	dnsTunnelDescLabel.SetTextColor(walk.RGB(100, 100, 100))
 
 	// Primary DNS Server section
