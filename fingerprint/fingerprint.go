@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"unsafe"
 
 	"github.com/fosrl/newt/logger"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -153,11 +155,25 @@ func getWindowsModelAndSerial() (string, string) {
 	return model, serial
 }
 
+// getPowerShellPath returns the full path to PowerShell executable.
+// It uses the Windows system directory to construct the path, which ensures
+// PowerShell can be found even when it's not in PATH (e.g., in service contexts).
+func getPowerShellPath() string {
+	systemDir, err := windows.GetSystemDirectory()
+	if err != nil {
+		// Fallback to "powershell.exe" if system directory lookup fails
+		logger.Debug("Posture check: Failed to get system directory, falling back to 'powershell.exe': %v", err)
+		return "powershell.exe"
+	}
+	// PowerShell is typically located at %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe
+	return filepath.Join(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe")
+}
+
 func windowsDiskEncrypted() bool {
 	command := "Get-BitLockerVolume -MountPoint 'C:' | Select-Object -ExpandProperty VolumeStatus"
 	logger.Debug("Posture check: Disk Encryption - Executing PowerShell command: %s", command)
 
-	cmd := exec.Command("powershell.exe", "-Command", command)
+	cmd := exec.Command(getPowerShellPath(), "-Command", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 
@@ -181,7 +197,7 @@ func windowsFirewallEnabled() bool {
 	command := "(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq $true }).Count -gt 0"
 	logger.Debug("Posture check: Firewall - Executing PowerShell command: %s", command)
 
-	cmd := exec.Command("powershell.exe", "-Command", command)
+	cmd := exec.Command(getPowerShellPath(), "-Command", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 
@@ -205,7 +221,7 @@ func windowsTPMAvailable() bool {
 	command := "Get-Tpm | Select-Object -ExpandProperty TpmPresent"
 	logger.Debug("Posture check: TPM - Executing PowerShell command: %s", command)
 
-	cmd := exec.Command("powershell.exe", "-Command", command)
+	cmd := exec.Command(getPowerShellPath(), "-Command", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 
@@ -237,7 +253,7 @@ func windowsAntivirusEnabled() bool {
 	command := "Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct | Select-Object -ExpandProperty productState"
 	logger.Debug("Posture check: Antivirus - Executing PowerShell command: %s", command)
 
-	cmd := exec.Command("powershell.exe", "-Command", command)
+	cmd := exec.Command(getPowerShellPath(), "-Command", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
