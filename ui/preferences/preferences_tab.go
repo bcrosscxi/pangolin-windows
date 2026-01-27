@@ -3,6 +3,7 @@
 package preferences
 
 import (
+	"net"
 	"strings"
 
 	"github.com/fosrl/newt/logger"
@@ -245,6 +246,11 @@ func (pt *PreferencesTab) Cleanup() {
 	// Nothing to clean up for now
 }
 
+// isValidIPAddress validates if a string is a valid IP address (IPv4 or IPv6)
+func isValidIPAddress(ip string) bool {
+	return net.ParseIP(ip) != nil
+}
+
 // onSave handles the save button click and saves all DNS settings
 func (pt *PreferencesTab) onSave() {
 	// Get current values from UI
@@ -267,6 +273,50 @@ func (pt *PreferencesTab) onSave() {
 			Owner:         owner,
 			Title:         "Invalid Input",
 			Content:       "Primary DNS Server cannot be empty.",
+			IconSystem:    walk.TaskDialogSystemIconWarning,
+			CommonButtons: win.TDCBF_OK_BUTTON,
+		})
+		return
+	}
+
+	// Validate primary DNS is a valid IP address
+	if !isValidIPAddress(primaryDNS) {
+		// Restore to current config value
+		currentValue := pt.configManager.GetPrimaryDNS()
+		pt.primaryDNSEdit.SetText(currentValue)
+		var owner walk.Form
+		if pt.window != nil {
+			owner = pt.window
+		}
+		td := walk.NewTaskDialog()
+		_, _ = td.Show(walk.TaskDialogOpts{
+			Owner:         owner,
+			Title:         "Invalid Input",
+			Content:       "Primary DNS Server must be a valid IP address.",
+			IconSystem:    walk.TaskDialogSystemIconWarning,
+			CommonButtons: win.TDCBF_OK_BUTTON,
+		})
+		return
+	}
+
+	// Validate secondary DNS is a valid IP address (if provided)
+	if secondaryDNS != "" && !isValidIPAddress(secondaryDNS) {
+		// Restore to current config value
+		currentValue := pt.configManager.GetSecondaryDNS()
+		if currentValue == "" {
+			pt.secondaryDNSEdit.SetText("")
+		} else {
+			pt.secondaryDNSEdit.SetText(currentValue)
+		}
+		var owner walk.Form
+		if pt.window != nil {
+			owner = pt.window
+		}
+		td := walk.NewTaskDialog()
+		_, _ = td.Show(walk.TaskDialogOpts{
+			Owner:         owner,
+			Title:         "Invalid Input",
+			Content:       "Secondary DNS Server must be a valid IP address.",
 			IconSystem:    walk.TaskDialogSystemIconWarning,
 			CommonButtons: win.TDCBF_OK_BUTTON,
 		})
