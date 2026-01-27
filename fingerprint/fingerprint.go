@@ -139,6 +139,7 @@ func getWindowsVersion() (string, string) {
 }
 
 func getWindowsModelAndSerial() (string, string) {
+	// Get model name from registry (this method works)
 	k, err := registry.OpenKey(
 		registry.LOCAL_MACHINE,
 		`SYSTEM\CurrentControlSet\Control\SystemInformation`,
@@ -150,7 +151,17 @@ func getWindowsModelAndSerial() (string, string) {
 	defer k.Close()
 
 	model, _, _ := k.GetStringValue("SystemProductName")
-	serial, _, _ := k.GetStringValue("BIOSSerialNumber")
+
+	// Get serial number using WMI/CIM (registry method doesn't work)
+	command := "Get-CimInstance Win32_ComputerSystemProduct | Select-Object -ExpandProperty IdentifyingNumber"
+	cmd := exec.Command(getPowerShellPath(), "-Command", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+
+	var serial string
+	if err == nil {
+		serial = strings.TrimSpace(string(out))
+	}
 
 	return model, serial
 }
