@@ -105,8 +105,9 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	if err != nil {
 		return nil, err
 	}
-	descLabel.SetText("When enabled, the client uses custom DNS servers to resolve internal resources and aliases. This overrides your system’s default DNS settings. Queries that cannot be resolved as a Pangolin resource will be forwarded to your configured Upstream DNS Server.")
+	descLabel.SetText("When enabled, the client uses custom DNS servers to resolve internal\nresources and aliases. This overrides your system’s default DNS settings.\nQueries that cannot be resolved as a Pangolin resource will be forwarded\nto your configured Upstream DNS Server.")
 	descLabel.SetTextColor(walk.RGB(100, 100, 100))
+	descLabel.SetMinMaxSize(walk.Size{}, walk.Size{Width: 400, Height: 0})
 
 	// DNS Tunnel section
 	dnsTunnelContainer, err := walk.NewComposite(contentContainer)
@@ -151,8 +152,9 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	if err != nil {
 		return nil, err
 	}
-	dnsTunnelDescLabel.SetText("When enabled, DNS queries are routed through the tunnel for remote resolution. To ensure queries are tunneled correctly, you must define the DNS server as a Pangolin resource and enter its address as an Upstream DNS Server.")
+	dnsTunnelDescLabel.SetText("When enabled, DNS queries are routed through the tunnel for\nremote resolution. To ensure queries are tunneled correctly,\nyou must define the DNS server as a Pangolin resource and\nenter its address as an Upstream DNS Server.")
 	dnsTunnelDescLabel.SetTextColor(walk.RGB(100, 100, 100))
+	dnsTunnelDescLabel.SetMinMaxSize(walk.Size{}, walk.Size{Width: 400, Height: 0})
 
 	// Primary DNS Server section
 	primaryDNSContainer, err := walk.NewComposite(contentContainer)
