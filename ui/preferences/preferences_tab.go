@@ -8,6 +8,7 @@ import (
 
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/windows/config"
+	browser "github.com/pkg/browser"
 	"github.com/tailscale/walk"
 	"github.com/tailscale/win"
 )
@@ -50,6 +51,18 @@ func (pt *PreferencesTab) Create(parent *walk.TabWidget) (*walk.TabPage, error) 
 	contentLayout.SetMargins(walk.Margins{})
 	contentLayout.SetSpacing(16)
 	contentContainer.SetLayout(contentLayout)
+
+	// Tip link to docs for settings
+	settingsDocLink, err := walk.NewLinkLabel(contentContainer)
+	if err != nil {
+		return nil, err
+	}
+	const settingsDocURL = "https://docs.pangolin.net/manage/clients/configure-client"
+	settingsDocLink.SetText(`Tip: <a href="` + settingsDocURL + `">See the docs for more information on these settings</a>`)
+	settingsDocLink.SetAlignment(walk.AlignHNearVNear)
+	settingsDocLink.LinkActivated().Attach(func(link *walk.LinkLabelLink) {
+		browser.OpenURL(settingsDocURL)
+	})
 
 	// DNS Settings section title
 	dnsSectionTitle, err := walk.NewLabel(contentContainer)
