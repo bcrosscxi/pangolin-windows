@@ -74,6 +74,7 @@ type APIClient struct {
 	sessionCookieName string
 	csrfToken         string
 	client            *http.Client
+	onUnauthorized    func()
 }
 
 // NewAPIClient creates a new API client instance
@@ -109,6 +110,11 @@ func (c *APIClient) UpdateSessionToken(token string) {
 // CurrentBaseURL returns the current base URL
 func (c *APIClient) CurrentBaseURL() string {
 	return c.baseURL
+}
+
+// SetOnUnauthorized sets the callback invoked when a request sent with a session token returns 401 or 403.
+func (c *APIClient) SetOnUnauthorized(fn func()) {
+	c.onUnauthorized = fn
 }
 
 // normalizeBaseURL normalizes a base URL string
@@ -211,6 +217,11 @@ func (c *APIClient) makeRequest(method, path string, body []byte) ([]byte, *http
 	if err != nil {
 		logger.Error("Error reading response body: %v", err)
 		return nil, resp, &APIError{Type: ErrorTypeInvalidResponse, Err: err}
+	}
+
+	// Notify when an authenticated request gets 401/403 so session-expired state can be set
+	if (resp.StatusCode == 401 || resp.StatusCode == 403) && c.sessionToken != "" && c.onUnauthorized != nil {
+		c.onUnauthorized()
 	}
 
 	return data, resp, nil

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,10 @@ func ShowLoginDialog(
 			hwnd := openLoginDialog.Handle()
 			win.ShowWindow(hwnd, win.SW_RESTORE)
 			win.SetForegroundWindow(hwnd)
+			// Clear re-auth flag so it doesn't persist; auto-start only applies when dialog is first opened
+			if authManager != nil {
+				authManager.ClearStartDeviceAuthImmediately()
+			}
 			openLoginDialogMutex.Unlock()
 			return
 		}
@@ -148,6 +153,7 @@ func ShowLoginDialog(
 	isLoggingIn := false
 	hasAutoOpenedBrowser := false
 	loginSucceeded := false
+	includeUsernameInDeviceURL := false // true only when entering from re-auth (start device auth immediately)
 	// Initialize temporary hostname from config (will be used for login flow, only persisted after successful login)
 	temporaryHostname := config.DefaultHostname
 	if activeAccount != nil {
@@ -275,6 +281,13 @@ func ShowLoginDialog(
 						// Remove middle hyphen from code (e.g., "XXXX-XXXX" -> "XXXXXXXX")
 						codeWithoutHyphen := strings.ReplaceAll(codeStr, "-", "")
 						autoOpenURL := fmt.Sprintf("%s/auth/login/device?code=%s", temporaryHostname, codeWithoutHyphen)
+						if includeUsernameInDeviceURL {
+							if u := authManager.CurrentUser(); u != nil && u.Email != "" {
+								autoOpenURL += "&user=" + url.QueryEscape(u.Email)
+							} else if activeAccount != nil && activeAccount.Email != "" {
+								autoOpenURL += "&user=" + url.QueryEscape(activeAccount.Email)
+							}
+						}
 						openBrowser(autoOpenURL)
 					}
 				}
@@ -335,6 +348,7 @@ func ShowLoginDialog(
 					CommonButtons: win.TDCBF_OK_BUTTON,
 				})
 				hasAutoOpenedBrowser = false
+				includeUsernameInDeviceURL = false
 				if hostingOpt == hostingCloud {
 					// For cloud, go back to hosting selection
 					currentState = stateHostingSelection
@@ -669,9 +683,12 @@ func ShowLoginDialog(
 		cancelLogin()
 		cancelPoll()
 
-		// Clear device auth state if login didn't succeed
+		// Clear device auth state and re-auth flag if login didn't succeed
 		if !loginSucceeded {
 			authManager.ClearDeviceAuth()
+			if authManager != nil {
+				authManager.ClearStartDeviceAuthImmediately()
+			}
 			logger.Info("Cleared device auth state after dialog close")
 		}
 
@@ -703,6 +720,7 @@ func ShowLoginDialog(
 						// Code was cleared, go back based on hosting option
 						walk.App().Synchronize(func() {
 							hasAutoOpenedBrowser = false
+							includeUsernameInDeviceURL = false
 							if hostingOpt == hostingCloud {
 								// For cloud, go back to hosting selection
 								currentState = stateHostingSelection
@@ -721,6 +739,26 @@ func ShowLoginDialog(
 				}
 			}
 		}
+	}()
+
+	// When opened from re-auth (session expired), skip hosting selection and start device auth immediately
+	go func() {
+		time.Sleep(150 * time.Millisecond) // Let the dialog become visible
+		walk.App().Synchronize(func() {
+			if authManager != nil && authManager.StartDeviceAuthImmediately() {
+				authManager.ClearStartDeviceAuthImmediately()
+				if activeAccount != nil {
+					temporaryHostname = activeAccount.Hostname
+					selfHostedURL = activeAccount.Hostname
+				}
+				includeUsernameInDeviceURL = true
+				hostingOpt = hostingSelfHosted
+				currentState = stateDeviceAuthCode
+				isLoggingIn = true
+				updateUI()
+				go performLogin()
+			}
+		})
 	}()
 
 	dlg.Run()
