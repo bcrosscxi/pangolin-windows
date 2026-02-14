@@ -55,17 +55,20 @@ type AuthManager struct {
 	secretManager  *secrets.SecretManager
 
 	// State
-	mu                 sync.RWMutex
-	isAuthenticated    bool
-	currentUser        *api.User
-	currentOrg         *api.Org
-	organizations      []api.Org
-	isInitializing     bool
-	errorMessage       *string
-	deviceAuthCode     *string
-	deviceAuthLoginURL *string
-	serverInfo         *api.ServerInfo
-	isServerDown       bool
+	mu                      sync.RWMutex
+	isAuthenticated         bool
+	currentUser             *api.User
+	currentOrg              *api.Org
+	organizations           []api.Org
+	isInitializing          bool
+	errorMessage            *string
+	deviceAuthCode          *string
+	deviceAuthLoginURL      *string
+	serverInfo              *api.ServerInfo
+	isServerDown            bool
+	sessionExpired          bool
+	isDeviceAuthInProgress  bool
+	startDeviceAuthImmediately bool
 }
 
 // NewAuthManager creates a new AuthManager instance
@@ -122,6 +125,15 @@ func (am *AuthManager) Initialize() error {
 			// Always fetch the latest user info to verify the user exists and update stored info
 			user, err := am.apiClient.GetUser()
 			if err != nil {
+				var apiErr *api.APIError
+				if errors.As(err, &apiErr) && (apiErr.Status == 401 || apiErr.Status == 403) {
+					// Session expired; keep user in logged-in UI and show re-auth
+					am.MarkSessionExpired()
+					am.mu.Lock()
+					am.isAuthenticated = true
+					am.mu.Unlock()
+					return nil
+				}
 				// Token is invalid or user doesn't exist, clear it
 				am.mu.Lock()
 				am.isAuthenticated = false
@@ -154,6 +166,15 @@ func (am *AuthManager) Initialize() error {
 // LoginWithDeviceAuth authenticates using device authentication flow
 // The context can be used to cancel the polling operation
 func (am *AuthManager) LoginWithDeviceAuth(ctx context.Context, hostnameOverride *string) error {
+	am.mu.Lock()
+	am.isDeviceAuthInProgress = true
+	am.mu.Unlock()
+	defer func() {
+		am.mu.Lock()
+		am.isDeviceAuthInProgress = false
+		am.mu.Unlock()
+	}()
+
 	// Use temporary API client if hostname override is provided
 	var loginClient *api.APIClient
 	if hostnameOverride != nil && *hostnameOverride != "" {
@@ -383,12 +404,23 @@ func (am *AuthManager) handleSuccessfulAuth(user *api.User, hostname string, tok
 
 	am.mu.Lock()
 	am.isAuthenticated = true
+	am.sessionExpired = false
+	am.startDeviceAuthImmediately = false
 	am.mu.Unlock()
 
 	// Fetch server info after successful authentication
 	_ = am.fetchServerInfo()
 
 	return nil
+}
+
+// MarkSessionExpired sets the session-expired state so the UI shows re-auth and disables connect.
+// Called from the API layer (on 401/403) and tunnel layer (on session-expired error codes).
+func (am *AuthManager) MarkSessionExpired() {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.sessionExpired = true
+	am.errorMessage = nil
 }
 
 // RefreshOrganizations refreshes the list of organizations
@@ -703,7 +735,7 @@ func (am *AuthManager) SwitchAccount(userID string) error {
 	am.apiClient.UpdateBaseURL(accountToSwitchTo.Hostname)
 	am.apiClient.UpdateSessionToken(token)
 
-	// Step 2: Clear user data immediately
+	// Step 2: Clear user data and per-session state immediately
 	am.mu.Lock()
 	am.currentUser = nil
 	am.currentOrg = nil
@@ -712,6 +744,7 @@ func (am *AuthManager) SwitchAccount(userID string) error {
 	am.isAuthenticated = true
 	am.isServerDown = false
 	am.errorMessage = nil
+	am.sessionExpired = false
 	am.mu.Unlock()
 
 	// Step 3: Validate with server (health check, fetch user, select org, fetch server info)
@@ -730,11 +763,15 @@ func (am *AuthManager) SwitchAccount(userID string) error {
 	// Fetch user data
 	user, err := am.apiClient.GetUser()
 	if err != nil {
-		// Show error but don't revert switch
-		am.mu.Lock()
-		msg := err.Error()
-		am.errorMessage = &msg
-		am.mu.Unlock()
+		var apiErr *api.APIError
+		if errors.As(err, &apiErr) && (apiErr.Status == 401 || apiErr.Status == 403) {
+			am.MarkSessionExpired()
+		} else {
+			am.mu.Lock()
+			msg := err.Error()
+			am.errorMessage = &msg
+			am.mu.Unlock()
+		}
 		logger.Error("Failed to fetch user after account switch: %v", err)
 		return nil
 	}
@@ -917,6 +954,36 @@ func (am *AuthManager) IsServerDown() bool {
 	am.mu.RLock()
 	defer am.mu.RUnlock()
 	return am.isServerDown
+}
+
+func (am *AuthManager) SessionExpired() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.sessionExpired
+}
+
+func (am *AuthManager) IsDeviceAuthInProgress() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.isDeviceAuthInProgress
+}
+
+func (am *AuthManager) StartDeviceAuthImmediately() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.startDeviceAuthImmediately
+}
+
+func (am *AuthManager) SetStartDeviceAuthImmediately(v bool) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.startDeviceAuthImmediately = v
+}
+
+func (am *AuthManager) ClearStartDeviceAuthImmediately() {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.startDeviceAuthImmediately = false
 }
 
 // ClearDeviceAuth clears the device authentication code and URL

@@ -371,6 +371,16 @@ type OLMStatusError struct {
 	Message string `json:"message"`
 }
 
+// sessionExpiredErrorCodes are OLM/connection error codes that mean session expired or unauthorized.
+// When the connection reports one of these before fully established, we set session-expired state.
+var sessionExpiredErrorCodes = map[string]struct{}{
+	"UNAUTHORIZED":                        {},
+	"SESSION_EXPIRED":                     {},
+	"ORG_ACCESS_POLICY_SESSION_EXPIRED":   {},
+	"INVALID_USER_SESSION":                {},
+	"USER_ID_NOT_FOUND":                   {},
+}
+
 // OLMStatusResponse represents the status response from OLM API
 type OLMStatusResponse struct {
 	Connected       bool                   `json:"connected"`
@@ -563,6 +573,9 @@ func (tm *Manager) StartStatusPolling() {
 					// Only handle errors during registration phase (not yet fully connected)
 					if currentState != StateRunning {
 						logger.Error("OLM status indicates error during registration: code=%s, message=%s", status.Error.Code, status.Error.Message)
+						if _, isSessionExpired := sessionExpiredErrorCodes[status.Error.Code]; isSessionExpired {
+							tm.authManager.MarkSessionExpired()
+						}
 						// Stop the tunnel immediately
 						if err := tm.Disconnect(); err != nil {
 							logger.Error("Failed to disconnect tunnel after error: %v", err)

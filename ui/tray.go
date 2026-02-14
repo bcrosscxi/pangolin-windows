@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,7 @@ var (
 	updateAction       *walk.Action
 	loadingAction      *walk.Action
 	statusAction       *walk.Action
+	reAuthLoginAction  *walk.Action
 	connectAction      *walk.Action
 	orgsMenuAction     *walk.Action
 	accountMenuAction  *walk.Action
@@ -168,11 +170,13 @@ func handleMenuOpen() {
 		// First, try to get the user to verify session is still valid
 		user, err := apiClient.GetUser()
 		if err != nil {
-			// If getting user fails, mark as logged out
-			loggedOutMutex.Lock()
-			isLoggedOut = true
-			loggedOutMutex.Unlock()
-			// Update menu to reflect logged out state
+			// 401/403: API callback already set sessionExpired; do not set isLoggedOut so we show "Account Locked" + "Log In"
+			var apiErr *api.APIError
+			if !(errors.As(err, &apiErr) && (apiErr.Status == 401 || apiErr.Status == 403)) {
+				loggedOutMutex.Lock()
+				isLoggedOut = true
+				loggedOutMutex.Unlock()
+			}
 			updateMenu()
 			return
 		}
@@ -257,6 +261,20 @@ func setupMenu() error {
 	statusAction.SetEnabled(false)
 	statusAction.SetVisible(false) // Hidden initially
 	actions.Add(statusAction)
+
+	// Create re-auth Log In action (shown when session expired, replaces connect)
+	reAuthLoginAction = walk.NewAction()
+	reAuthLoginAction.SetText("Log In")
+	reAuthLoginAction.SetVisible(false) // Shown only when sessionExpired
+	reAuthLoginAction.Triggered().Attach(func() {
+		if authManager != nil {
+			authManager.SetStartDeviceAuthImmediately(true)
+		}
+		ShowLoginDialog(mainWindow, authManager, configManager, accountManager, apiClient, tunnelManager)
+		time.Sleep(100 * time.Millisecond)
+		updateMenu()
+	})
+	actions.Add(reAuthLoginAction)
 
 	// Create connect action
 	connectAction = walk.NewAction()
@@ -643,8 +661,9 @@ func updateMenu() {
 
 		// Update server status messages
 		isServerDown := authManager != nil && authManager.IsServerDown()
+		sessionExpired := authManager != nil && authManager.SessionExpired()
 		errorMessage := authManager.ErrorMessage()
-		hasErrorMessage := errorMessage != nil && *errorMessage != "" && !isServerDown
+		hasErrorMessage := errorMessage != nil && *errorMessage != "" && !isServerDown && !sessionExpired
 
 		if serverDownAction != nil {
 			serverDownAction.SetVisible(isAuthenticated && isServerDown && !isInitializing)
@@ -692,7 +711,7 @@ func updateMenu() {
 				}
 			}
 
-			if shouldShow {
+			if shouldShow && !sessionExpired {
 				watermarkAction.SetText(watermarkText)
 				watermarkAction.SetVisible(true)
 			} else {
@@ -701,24 +720,35 @@ func updateMenu() {
 		}
 
 		// Update authenticated section visibility
-		// Show full auth section if: authenticated and not logged out
+		// Show full auth section if: authenticated and (not logged out or session expired so we show re-auth)
 		// Show even if server is down to allow account switching/logout
-		showAuthSection := isAuthenticated && !isLoggedOutLocal && !isInitializing
+		showAuthSection := isAuthenticated && (!isLoggedOutLocal || sessionExpired) && !isInitializing
 
 		if statusAction != nil {
 			statusAction.SetVisible(showAuthSection)
 		}
 		if connectAction != nil {
-			connectAction.SetVisible(showAuthSection)
+			connectAction.SetVisible(showAuthSection && !sessionExpired)
+		}
+		if reAuthLoginAction != nil {
+			reAuthLoginAction.SetVisible(showAuthSection && sessionExpired)
+			reAuthLoginAction.SetEnabled(authManager == nil || !authManager.IsDeviceAuthInProgress())
+			reAuthLoginAction.SetText("Log In")
 		}
 		if orgsMenuAction != nil {
-			orgsMenuAction.SetVisible(showAuthSection)
+			orgsMenuAction.SetVisible(showAuthSection && !sessionExpired)
 		}
 
-		// Update tunnel state and organizations only when fully authenticated
+		// Update tunnel state and organizations only when fully authenticated and not session expired
 		if showAuthSection {
-			updateTunnelState()
-			updateOrganizations()
+			if sessionExpired {
+				if statusAction != nil {
+					statusAction.SetText("Account Locked")
+				}
+			} else {
+				updateTunnelState()
+				updateOrganizations()
+			}
 		}
 
 		updateAccountMenu()

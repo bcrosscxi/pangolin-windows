@@ -233,6 +233,11 @@ func main() {
 	apiClient := api.NewAPIClient(hostname, "")
 	authManager := auth.NewAuthManager(apiClient, configManager, accountManager, secretManager)
 
+	// When any authenticated request gets 401/403, set session-expired on the UI thread
+	apiClient.SetOnUnauthorized(func() {
+		walk.App().Synchronize(authManager.MarkSessionExpired)
+	})
+
 	// Initialize auth manager (loads saved session token if available)
 	if err := authManager.Initialize(); err != nil {
 		logger.Error("Failed to initialize auth manager: %v", err)
