@@ -15,14 +15,14 @@ import (
 
 // PreferencesTab handles the preferences/settings tab
 type PreferencesTab struct {
-	tabPage             *walk.TabPage
-	dnsOverrideCheckBox *walk.CheckBox
-	dnsTunnelCheckBox   *walk.CheckBox
-	primaryDNSEdit      *walk.LineEdit
-	secondaryDNSEdit    *walk.LineEdit
-	saveButton          *walk.PushButton
-	configManager       *config.ConfigManager
-	window              *PreferencesWindow
+	tabPage                    *walk.TabPage
+	dnsOverrideCheckBox        *walk.CheckBox
+	dnsTunnelCheckBox          *walk.CheckBox
+	primaryDNSEdit             *walk.LineEdit
+	secondaryDNSEdit           *walk.LineEdit
+	saveButton                 *walk.PushButton
+	configManager              *config.ConfigManager
+	window                     *PreferencesWindow
 }
 
 // NewPreferencesTab creates a new preferences tab

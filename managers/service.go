@@ -3,14 +3,16 @@
 package managers
 
 import (
+	"encoding/binary"
 	"errors"
+	"net"
 	"os"
 	"runtime"
 	"strconv"
 	"sync"
-	"time"
 	"unsafe"
 
+	"github.com/Microsoft/go-winio"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/windows/config"
 	"golang.org/x/sys/windows"
@@ -150,105 +152,91 @@ func (service *managerService) Execute(args []string, r <-chan svc.ChangeRequest
 		}
 		defer runToken.Close()
 		userToken = 0
-		first := true
-		for {
-			if stoppingManager {
-				return
-			}
 
-			procsLock.Lock()
-			if alive := aliveSessions[session]; !alive {
-				procsLock.Unlock()
-				return
-			}
+		// Start UI process once; do not auto-restart when it exits (user can run exe again to get UI)
+		procsLock.Lock()
+		if alive := aliveSessions[session]; !alive {
 			procsLock.Unlock()
+			return
+		}
+		procsLock.Unlock()
 
-			if !first {
-				time.Sleep(time.Second)
-			} else {
-				first = false
-			}
+		if stoppingManager {
+			return
+		}
 
-			ourReader, theirWriter, err := os.Pipe()
-			if err != nil {
-				logger.Error("Unable to create pipe: %v", err)
-				return
-			}
-			theirReader, ourWriter, err := os.Pipe()
-			if err != nil {
-				logger.Error("Unable to create pipe: %v", err)
-				return
-			}
-			theirEvents, ourEvents, err := os.Pipe()
-			if err != nil {
-				logger.Error("Unable to create pipe: %v", err)
-				return
-			}
-			IPCServerListen(ourReader, ourWriter, ourEvents, elevatedToken)
-			// TODO: Add log mapping handle when ringlogger is implemented
-			// theirLogMapping, err := ringlogger.Global.ExportInheritableMappingHandle()
-			// if err != nil {
-			// 	logger.Error("Unable to export inheritable mapping handle for logging: %v", err)
-			// 	return
-			// }
+		ourReader, theirWriter, err := os.Pipe()
+		if err != nil {
+			logger.Error("Unable to create pipe: %v", err)
+			return
+		}
+		theirReader, ourWriter, err := os.Pipe()
+		if err != nil {
+			logger.Error("Unable to create pipe: %v", err)
+			return
+		}
+		theirEvents, ourEvents, err := os.Pipe()
+		if err != nil {
+			logger.Error("Unable to create pipe: %v", err)
+			return
+		}
+		IPCServerListen(ourReader, ourWriter, ourEvents, elevatedToken)
+		// TODO: Add log mapping handle when ringlogger is implemented
+		// theirLogMapping, err := ringlogger.Global.ExportInheritableMappingHandle()
+		// if err != nil {
+		// 	logger.Error("Unable to export inheritable mapping handle for logging: %v", err)
+		// 	return
+		// }
 
-			logger.Info("Starting UI process for user '%s@%s' for session %d", username, domain, session)
-			procsLock.Lock()
-			var proc *uiProcess
-			if alive := aliveSessions[session]; alive {
-				proc, err = launchUIProcess(path, []string{
-					path,
-					"/ui",
-					strconv.FormatUint(uint64(theirReader.Fd()), 10),
-					strconv.FormatUint(uint64(theirWriter.Fd()), 10),
-					strconv.FormatUint(uint64(theirEvents.Fd()), 10),
-					// strconv.FormatUint(uint64(theirLogMapping), 10), // TODO: Add when ringlogger is implemented
-				}, userProfileDirectory, []windows.Handle{
-					windows.Handle(theirReader.Fd()),
-					windows.Handle(theirWriter.Fd()),
-					windows.Handle(theirEvents.Fd()),
-					// theirLogMapping, // TODO: Add when ringlogger is implemented
-				}, runToken)
-			} else {
-				err = errors.New("Session has logged out")
-			}
-			procsLock.Unlock()
-			theirReader.Close()
-			theirWriter.Close()
-			theirEvents.Close()
-			// windows.CloseHandle(theirLogMapping) // TODO: Add when ringlogger is implemented
-			if err != nil {
-				ourReader.Close()
-				ourWriter.Close()
-				ourEvents.Close()
-				logger.Error("Unable to start manager UI process for user '%s@%s' for session %d: %v", username, domain, session, err)
-				return
-			}
-
-			procsLock.Lock()
-			procs[session] = proc
-			procsLock.Unlock()
-
-			sessionIsDead := false
-			if exitCode, err := proc.Wait(); err == nil {
-				logger.Info("Exited UI process for user '%s@%s' for session %d with status %x", username, domain, session, exitCode)
-				const STATUS_DLL_INIT_FAILED_LOGOFF = 0xC000026B
-				sessionIsDead = exitCode == STATUS_DLL_INIT_FAILED_LOGOFF
-			} else {
-				logger.Error("Unable to wait for UI process for user '%s@%s' for session %d: %v", username, domain, session, err)
-			}
-
-			procsLock.Lock()
-			delete(procs, session)
-			procsLock.Unlock()
+		logger.Info("Starting UI process for user '%s@%s' for session %d", username, domain, session)
+		procsLock.Lock()
+		var proc *uiProcess
+		if alive := aliveSessions[session]; alive {
+			proc, err = launchUIProcess(path, []string{
+				path,
+				"/ui",
+				strconv.FormatUint(uint64(theirReader.Fd()), 10),
+				strconv.FormatUint(uint64(theirWriter.Fd()), 10),
+				strconv.FormatUint(uint64(theirEvents.Fd()), 10),
+				// strconv.FormatUint(uint64(theirLogMapping), 10), // TODO: Add when ringlogger is implemented
+			}, userProfileDirectory, []windows.Handle{
+				windows.Handle(theirReader.Fd()),
+				windows.Handle(theirWriter.Fd()),
+				windows.Handle(theirEvents.Fd()),
+				// theirLogMapping, // TODO: Add when ringlogger is implemented
+			}, runToken)
+		} else {
+			err = errors.New("Session has logged out")
+		}
+		procsLock.Unlock()
+		theirReader.Close()
+		theirWriter.Close()
+		theirEvents.Close()
+		// windows.CloseHandle(theirLogMapping) // TODO: Add when ringlogger is implemented
+		if err != nil {
 			ourReader.Close()
 			ourWriter.Close()
 			ourEvents.Close()
-
-			if sessionIsDead {
-				return
-			}
+			logger.Error("Unable to start manager UI process for user '%s@%s' for session %d: %v", username, domain, session, err)
+			return
 		}
+
+		procsLock.Lock()
+		procs[session] = proc
+		procsLock.Unlock()
+
+		if exitCode, waitErr := proc.Wait(); waitErr == nil {
+			logger.Info("Exited UI process for user '%s@%s' for session %d with status %x", username, domain, session, exitCode)
+		} else {
+			logger.Error("Unable to wait for UI process for user '%s@%s' for session %d: %v", username, domain, session, waitErr)
+		}
+
+		procsLock.Lock()
+		delete(procs, session)
+		procsLock.Unlock()
+		ourReader.Close()
+		ourWriter.Close()
+		ourEvents.Close()
 	}
 	procsGroup := sync.WaitGroup{}
 	goStartProcess := func(session uint32) {
@@ -263,27 +251,23 @@ func (service *managerService) Execute(args []string, r <-chan svc.ChangeRequest
 	// TODO: Add driver cleanup when driver package is implemented
 	// go driver.UninstallLegacyWintun()
 
-	var sessionsPointer *windows.WTS_SESSION_INFO
-	var count uint32
-	err = windows.WTSEnumerateSessions(0, 0, 1, &sessionsPointer, &count)
-	if err != nil {
-		logger.Error("Failed to enumerate sessions: %v", err)
-		return false, 1
+	// Do not auto-start UI processes at boot; they would often start before the user's
+	// shell is ready and show no tray, and then the exe would think a UI is already running.
+	// UI is started only when the user runs the exe (RequestUILaunch) or on session logon.
+
+	// Listen for UI launch requests from standard users (named pipe).
+	requestUILaunchChan := make(chan uint32)
+	var pipeListener net.Listener
+	pipeConfig := &winio.PipeConfig{
+		SecurityDescriptor: "D:(A;;GA;;;WD)", // Allow Everyone to connect
 	}
-	for _, session := range unsafe.Slice(sessionsPointer, count) {
-		if session.State != windows.WTSActive && session.State != windows.WTSDisconnected {
-			continue
-		}
-		procsLock.Lock()
-		if alive := aliveSessions[session.SessionID]; !alive {
-			aliveSessions[session.SessionID] = true
-			if _, ok := procs[session.SessionID]; !ok {
-				goStartProcess(session.SessionID)
-			}
-		}
-		procsLock.Unlock()
+	listener, listenErr := winio.ListenPipe(uiLaunchPipePath, pipeConfig)
+	if listenErr != nil {
+		logger.Error("Failed to create UI launch pipe listener: %v", listenErr)
+	} else {
+		pipeListener = listener
+		go runUILaunchPipeListener(listener, requestUILaunchChan, procs, aliveSessions, &procsLock)
 	}
-	windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessionsPointer)))
 
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptSessionChange}
 
@@ -291,6 +275,12 @@ func (service *managerService) Execute(args []string, r <-chan svc.ChangeRequest
 loop:
 	for {
 		select {
+		case sessionID := <-requestUILaunchChan:
+			procsLock.Lock()
+			if _, ok := procs[sessionID]; !ok && aliveSessions[sessionID] {
+				goStartProcess(sessionID)
+			}
+			procsLock.Unlock()
 		case <-quitManagersChan:
 			uninstall = true
 			// Set stoppingManager immediately to prevent startProcess goroutines
@@ -347,6 +337,9 @@ loop:
 		proc.Kill()
 	}
 	procsLock.Unlock()
+	if pipeListener != nil {
+		_ = pipeListener.Close()
+	}
 	procsGroup.Wait()
 	if uninstall {
 		err = UninstallManager()
@@ -355,6 +348,57 @@ loop:
 		}
 	}
 	return false, 0
+}
+
+// runUILaunchPipeListener accepts connections on the named pipe and handles UI launch requests.
+func runUILaunchPipeListener(listener net.Listener, requestCh chan<- uint32, procs map[uint32]*uiProcess, aliveSessions map[uint32]bool, procsLock *sync.Mutex) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go handleUILaunchConn(conn, requestCh, procs, aliveSessions, procsLock)
+	}
+}
+
+// handleUILaunchConn reads a session ID from the client, validates it, and either responds with
+// 0 (launching), 1 (already running), or 2 (session not found).
+func handleUILaunchConn(conn net.Conn, requestCh chan<- uint32, procs map[uint32]*uiProcess, aliveSessions map[uint32]bool, procsLock *sync.Mutex) {
+	defer conn.Close()
+
+	var sessionID uint32
+	if err := binary.Read(conn, binary.LittleEndian, &sessionID); err != nil {
+		logger.Error("UI launch pipe: failed to read session ID: %v", err)
+		return
+	}
+
+	var response uint32
+	procsLock.Lock()
+	if _, ok := procs[sessionID]; ok {
+		response = 1 // already running
+		procsLock.Unlock()
+	} else {
+		// Validate session is active (e.g. user is logged in).
+		var token windows.Token
+		if err := windows.WTSQueryUserToken(sessionID, &token); err != nil {
+			response = 2 // session not found or not active
+			procsLock.Unlock()
+		} else {
+			token.Close()
+			aliveSessions[sessionID] = true
+			procsLock.Unlock()
+			select {
+			case requestCh <- sessionID:
+				response = 0 // success
+			default:
+				response = 2 // channel full or service shutting down
+			}
+		}
+	}
+
+	if err := binary.Write(conn, binary.LittleEndian, response); err != nil {
+		logger.Error("UI launch pipe: failed to write response: %v", err)
+	}
 }
 
 func Run() error {
