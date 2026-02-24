@@ -313,9 +313,7 @@ loop:
 					procsLock.Lock()
 					if alive := aliveSessions[sessionNotification.SessionID]; !alive {
 						aliveSessions[sessionNotification.SessionID] = true
-						if _, ok := procs[sessionNotification.SessionID]; !ok {
-							goStartProcess(sessionNotification.SessionID)
-						}
+						// Do not start UI here; only start when user runs the exe (RequestUILaunch)
 					}
 					procsLock.Unlock()
 				default:

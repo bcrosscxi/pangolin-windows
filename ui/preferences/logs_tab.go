@@ -174,13 +174,6 @@ func (lt *LogsTab) Cleanup() {
 	}
 }
 
-func (lt *LogsTab) isAtBottom() bool {
-	if len(lt.model.items) == 0 {
-		return true
-	}
-	return lt.isLastRowVisible(len(lt.model.items) - 1)
-}
-
 // isLastRowVisible returns true if the row at lastIndex is visible or within auto-scroll threshold of the bottom.
 // Use this when the model has already been updated (e.g. in Synchronize) to check "was user at bottom" before the update.
 func (lt *LogsTab) isLastRowVisible(lastIndex int) bool {
