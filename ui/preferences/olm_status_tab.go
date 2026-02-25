@@ -5,10 +5,12 @@ package preferences
 import (
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/windows/tunnel"
 
 	"github.com/tailscale/walk"
@@ -425,6 +427,11 @@ func (ost *OLMStatusTab) pollOLMStatus() {
 
 // updateUI updates the UI based on current status and display mode
 func (ost *OLMStatusTab) updateUI() {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("OLM status tab panic in updateUI: %v\n%s", r, debug.Stack())
+		}
+	}()
 	ost.mu.Lock()
 	status := ost.currentStatus
 	ost.mu.Unlock()

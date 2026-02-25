@@ -55,19 +55,19 @@ type AuthManager struct {
 	secretManager  *secrets.SecretManager
 
 	// State
-	mu                      sync.RWMutex
-	isAuthenticated         bool
-	currentUser             *api.User
-	currentOrg              *api.Org
-	organizations           []api.Org
-	isInitializing          bool
-	errorMessage            *string
-	deviceAuthCode          *string
-	deviceAuthLoginURL      *string
-	serverInfo              *api.ServerInfo
-	isServerDown            bool
-	sessionExpired          bool
-	isDeviceAuthInProgress  bool
+	mu                         sync.RWMutex
+	isAuthenticated            bool
+	currentUser                *api.User
+	currentOrg                 *api.Org
+	organizations              []api.Org
+	isInitializing             bool
+	errorMessage               *string
+	deviceAuthCode             *string
+	deviceAuthLoginURL         *string
+	serverInfo                 *api.ServerInfo
+	isServerDown               bool
+	sessionExpired             bool
+	isDeviceAuthInProgress     bool
 	startDeviceAuthImmediately bool
 }
 
@@ -830,7 +830,7 @@ func (am *AuthManager) Logout() error {
 
 	_ = am.secretManager.DeleteSessionToken(userID)
 	// for backward compatibility with old servers so we dont recreate the olm
-	// we are keeping this commented out for now so we dont remove the olm 
+	// we are keeping this commented out for now so we dont remove the olm
 	// _ = am.secretManager.DeleteOlmCredentials(userID)
 
 	_ = am.accountManager.RemoveAccount(userID)

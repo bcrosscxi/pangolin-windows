@@ -80,7 +80,7 @@ func InstallManager() error {
 
 	svcConfig := mgr.Config{
 		ServiceType:  windows.SERVICE_WIN32_OWN_PROCESS,
-		StartType:    mgr.StartManual,
+		StartType:    mgr.StartAutomatic,
 		ErrorControl: mgr.ErrorNormal,
 		DisplayName:  config.AppName + " Manager",
 	}

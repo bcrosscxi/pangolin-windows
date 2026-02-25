@@ -408,7 +408,7 @@ type OLMPeerStatus struct {
 
 // SwitchOrgRequest represents the request body for switching organizations
 type SwitchOrgRequest struct {
-	OrgID string `json:"orgId"`
+	OrgID string `json:"org_id"`
 }
 
 // getOLMPipePath returns the Windows named pipe path for OLM

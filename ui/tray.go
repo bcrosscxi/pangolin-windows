@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -532,6 +533,19 @@ func setupMenu() error {
 	preferencesAction.Triggered().Attach(func() {
 		go func() {
 			walk.App().Synchronize(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Error("Panic opening preferences: %v\n%s", r, debug.Stack())
+						td := walk.NewTaskDialog()
+						_, _ = td.Show(walk.TaskDialogOpts{
+							Owner:         mainWindow,
+							Title:         "Error",
+							Content:       fmt.Sprintf("Failed to open preferences: %v", r),
+							IconSystem:    walk.TaskDialogSystemIconError,
+							CommonButtons: win.TDCBF_OK_BUTTON,
+						})
+					}
+				}()
 				if err := preferences.ShowPreferencesWindow(mainWindow, tunnelManager, configManager, trayIcon); err != nil {
 					logger.Error("Failed to show preferences window: %v", err)
 					td := walk.NewTaskDialog()
@@ -564,39 +578,12 @@ func setupMenu() error {
 	// Separator before Quit (if watermark is shown, this will be after it)
 	actions.Add(walk.NewSeparatorAction())
 
-	// Create quit action
+	// Create quit action — stops any active tunnels via manager, then closes the UI process; manager service keeps running
 	quitAction = walk.NewAction()
 	quitAction.SetText("Quit")
 	quitAction.Triggered().Attach(func() {
-		// Try to quit the manager service (stops tunnels and quits manager)
-		go func() {
-			alreadyQuit, err := managers.IPCClientQuit(true) // true = stop tunnels on quit
-			if err != nil {
-				logger.Error("Failed to quit manager service: %v", err)
-				// Show error dialog to user
-				walk.App().Synchronize(func() {
-					td := walk.NewTaskDialog()
-					_, _ = td.Show(walk.TaskDialogOpts{
-						Owner:         mainWindow,
-						Title:         "Quit Failed",
-						Content:       fmt.Sprintf("Failed to quit manager service: %v", err),
-						IconSystem:    walk.TaskDialogSystemIconError,
-						CommonButtons: win.TDCBF_OK_BUTTON,
-					})
-					// Still try to exit even if quit failed
-					walk.App().Exit(0)
-				})
-				return
-			} else if alreadyQuit {
-				logger.Info("Manager service already quitting")
-			} else {
-				logger.Info("Manager service quit requested")
-			}
-			// Exit the UI after the quit request has been sent and acknowledged
-			walk.App().Synchronize(func() {
-				walk.App().Exit(0)
-			})
-		}()
+		_ = managers.IPCClientStopAllTunnels() // stop tunnels before exiting; ignore errors (e.g. no manager connection)
+		walk.App().Exit(0)
 	})
 	actions.Add(quitAction)
 

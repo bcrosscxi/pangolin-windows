@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/fosrl/windows/api"
 	"github.com/fosrl/windows/auth"
@@ -23,6 +25,20 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+var (
+	user32          = syscall.NewLazyDLL("user32.dll")
+	procMessageBoxW = user32.NewProc("MessageBoxW")
+)
+
+const mbOK = 0x00000000
+
+// showMessageBox displays a message box (used when run without UI, e.g. RequestUILaunch failed).
+func showMessageBox(text, caption string) {
+	textPtr, _ := windows.UTF16PtrFromString(text)
+	captionPtr, _ := windows.UTF16PtrFromString(caption)
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(textPtr)), uintptr(unsafe.Pointer(captionPtr)), mbOK)
+}
 
 func execElevatedManagerServiceInstaller() error {
 	path, err := os.Executable()
@@ -79,15 +95,23 @@ func main() {
 		if err != nil {
 			if err == managers.ErrManagerAlreadyRunning {
 				logger.Info("Manager service is already running")
-				// Wait a bit for UI to appear
-				time.Sleep(5 * time.Second)
+				// Request UI launch so user gets the UI from this run (e.g. first launch raced with another)
+				time.Sleep(2 * time.Second)
+				managers.RequestUILaunch()
 				return
 			}
 			logger.Fatal("Failed to install manager service: %v", err)
 		}
 		logger.Info("Manager service installed successfully")
-		// Wait a bit for service to start and UI to appear
-		time.Sleep(5 * time.Second)
+		// Wait for service to start and listen on the UI launch pipe, then request UI so first launch shows UI without a second run
+		time.Sleep(2 * time.Second)
+		if managers.RequestUILaunch() {
+			logger.Info("UI launch requested successfully")
+		} else {
+			// Retry once in case the pipe wasn't ready yet
+			time.Sleep(2 * time.Second)
+			managers.RequestUILaunch()
+		}
 		return
 	}
 
@@ -113,21 +137,19 @@ func main() {
 		logger.Info("Connected to manager service via IPC")
 		// Fall through to run UI
 	} else {
-		// No arguments - check if manager service is running, install/start if needed
-		// This is the normal entry point when user double-clicks the .exe
-		serviceName := config.AppName + "Manager"
+		// No arguments - normal entry when user double-clicks the .exe.
+		// Try the named pipe first so standard users never need SCM or UAC when the manager is running.
+		if managers.RequestUILaunch() {
+			return
+		}
 
-		// Try to connect to service manager
-		// Note: Standard users should be able to connect to query services,
-		// but may need elevation to install/start services
+		// Pipe connect failed (manager not running or not installed). Use SCM to install/start; may require UAC.
+		serviceName := config.AppName + "Manager"
 		m, err := mgr.Connect()
 		if err != nil {
-			// If we can't connect to service manager, we can't check service status
-			// This is unusual for standard users - they should be able to connect to query services
 			if err == windows.ERROR_ACCESS_DENIED {
 				logger.Info("Cannot access service manager without admin privileges")
 				logger.Info("Attempting to install/start manager service (will show UAC prompt)...")
-				// Try to elevate to install/start the service
 				err = execElevatedManagerServiceInstaller()
 				if err != nil {
 					logger.Fatal("Failed to install/start manager service: %v\nPlease run as administrator to install the service.", err)
@@ -140,7 +162,6 @@ func main() {
 
 		service, err := m.OpenService(serviceName)
 		if err != nil {
-			// Service doesn't exist, need to install it (requires elevation)
 			logger.Info("Manager service not found, installing...")
 			err = execElevatedManagerServiceInstaller()
 			if err != nil {
@@ -155,23 +176,22 @@ func main() {
 			logger.Fatal("Failed to query service status: %v", err)
 		}
 
-		// If service is already running, exit - the manager service will automatically
-		// launch the UI for logged-in users. No UAC prompt needed.
 		if status.State == svc.Running || status.State == svc.StartPending {
-			logger.Info("Manager service is already running")
+			// Service is running but pipe failed earlier; try UI launch once more
+			if managers.RequestUILaunch() {
+				return
+			}
+			logger.Error("Could not start Pangolin. Please try again or contact your administrator.")
+			showMessageBox("Could not start Pangolin. Please try again or contact your administrator.", "Pangolin")
 			return
 		}
 
 		if status.State == svc.Stopped {
-			// Service exists but is stopped, try to start it
 			logger.Info("Manager service is stopped, starting...")
 			err = service.Start()
 			if err != nil {
-				// If we don't have permission to start the service, try to elevate
 				if err == windows.ERROR_ACCESS_DENIED {
 					logger.Info("Need admin privileges to start service, requesting elevation...")
-					// Use cmd.exe to run net start, which can be elevated to start the service
-					// This will show a UAC prompt if needed
 					err = elevate.ShellExecute("cmd.exe", fmt.Sprintf("/c net start \"%s\"", serviceName), "", windows.SW_HIDE)
 					if err != nil && err != windows.ERROR_CANCELLED {
 						logger.Fatal("Failed to start manager service (access denied): %v\nPlease start the service manually or run as administrator.", err)
@@ -180,9 +200,7 @@ func main() {
 						logger.Info("User cancelled elevation, cannot start service")
 						return
 					}
-					// Wait a moment for service to start
 					time.Sleep(2 * time.Second)
-					// Verify it started
 					status, err = service.Query()
 					if err != nil {
 						logger.Fatal("Failed to query service status after start: %v", err)
@@ -195,14 +213,15 @@ func main() {
 					logger.Fatal("Failed to start manager service: %v", err)
 				}
 			} else {
-				// Wait a moment for service to start and launch UI
 				logger.Info("Manager service started, UI should appear shortly")
 				time.Sleep(2 * time.Second)
 			}
 		}
 
-		// Exit - the manager service will handle launching the UI
-		// The manager service automatically launches UI processes for logged-in users
+		// After install/start, try UI launch again so user gets the UI without relaunching
+		if managers.RequestUILaunch() {
+			return
+		}
 		return
 	}
 

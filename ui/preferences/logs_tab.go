@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,10 @@ func (lt *LogsTab) SetWindow(window *PreferencesWindow) {
 
 // AfterAdd is called after the tab page is added to the tab widget
 func (lt *LogsTab) AfterAdd() {
+	// Start log reader only after tab is in the widget tree to avoid UI-thread races
+	if lt.model != nil {
+		lt.model.start()
+	}
 	// Create buttons container after tab is added to widget tree (like old code)
 	var err error
 	buttonsContainer, err := walk.NewComposite(lt.tabPage)
@@ -169,30 +174,24 @@ func (lt *LogsTab) Cleanup() {
 	}
 }
 
-func (lt *LogsTab) isAtBottom() bool {
-	if len(lt.model.items) == 0 {
+// isLastRowVisible returns true if the row at lastIndex is visible or within auto-scroll threshold of the bottom.
+// Use this when the model has already been updated (e.g. in Synchronize) to check "was user at bottom" before the update.
+func (lt *LogsTab) isLastRowVisible(lastIndex int) bool {
+	if lastIndex < 0 {
 		return true
 	}
-
-	// Check if the last item is visible
-	lastIndex := len(lt.model.items) - 1
 	if lt.logView.ItemVisible(lastIndex) {
 		return true
 	}
-
-	// Check if we're within the threshold of the bottom
-	// If any of the last N items are visible, consider it "at bottom"
 	thresholdStart := lastIndex - autoScrollThreshold
 	if thresholdStart < 0 {
 		thresholdStart = 0
 	}
-
 	for i := thresholdStart; i <= lastIndex; i++ {
 		if lt.logView.ItemVisible(i) {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -279,30 +278,27 @@ type logModel struct {
 }
 
 func newLogModel(lt *LogsTab) *logModel {
-	mdl := &logModel{
+	return &logModel{
 		lt:   lt,
 		quit: make(chan bool),
 	}
+}
 
-	// Load initial logs
+// start begins loading logs and tailing the log file. Call after the tab is in the widget tree (e.g. from AfterAdd).
+func (mdl *logModel) start() {
 	mdl.loadInitialLogs()
-
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
-
 		for {
 			select {
 			case <-ticker.C:
 				mdl.readNewLines()
-
 			case <-mdl.quit:
 				return
 			}
 		}
 	}()
-
-	return mdl
 }
 
 func (mdl *logModel) cleanup() {
@@ -354,6 +350,11 @@ func (mdl *logModel) loadInitialLogs() {
 	mdl.filePos = mdl.lastSize
 
 	walk.App().Synchronize(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("Logs tab panic in loadInitialLogs: %v\n%s", r, debug.Stack())
+			}
+		}()
 		mdl.PublishRowsReset()
 		mdl.lt.scrollToBottom()
 	})
@@ -412,8 +413,8 @@ func (mdl *logModel) readNewLines() {
 	}
 
 	mdl.mu.Lock()
-	isAtBottom := mdl.lt.isAtBottom() && len(mdl.lt.logView.SelectedIndexes()) <= 1
-
+	// Last row index before we append; used in Synchronize to check "was user at bottom" (view still shows old count there)
+	lastIndexBeforeAppend := len(mdl.items) - 1
 	mdl.items = append(mdl.items, newItems...)
 	if len(mdl.items) > maxLogLinesDisplayed {
 		mdl.items = mdl.items[len(mdl.items)-maxLogLinesDisplayed:]
@@ -424,8 +425,15 @@ func (mdl *logModel) readNewLines() {
 	mdl.lastSize = currentSize
 
 	walk.App().Synchronize(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("Logs tab panic in readNewLines: %v\n%s", r, debug.Stack())
+			}
+		}()
+		// Check if user was at bottom using the *previous* last row (view hasn't updated yet, so this is correct)
+		wasAtBottom := mdl.lt.isLastRowVisible(lastIndexBeforeAppend) && len(mdl.lt.logView.SelectedIndexes()) <= 1
 		mdl.PublishRowsReset()
-		if isAtBottom {
+		if wasAtBottom {
 			mdl.lt.scrollToBottom()
 		}
 	})
