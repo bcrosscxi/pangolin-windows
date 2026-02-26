@@ -18,6 +18,21 @@
           <File Id="PangolinExe" 
                 Source="$(var.BuildDir)/Pangolin.exe" 
                 KeyPath="yes" />
+          <ServiceInstall Id="PangolinManagerServiceInstall"
+                Name="PangolinManager"
+                DisplayName="Pangolin Manager"
+                Description="Manages Pangolin tunnel connections and updates."
+                Type="ownProcess"
+                Start="auto"
+                ErrorControl="normal"
+                Arguments="/managerservice"
+                Account="LocalSystem" />
+          <ServiceControl Id="PangolinManagerServiceControl"
+                Name="PangolinManager"
+                Start="install"
+                Stop="both"
+                Remove="uninstall"
+                Wait="yes" />
         </Component>
         <Component Id="WintunDll" Guid="A8B9C0D1-E2F3-4A5B-8C9D-0E1F2A3B4C5D">
           <File Id="WintunDll" 
@@ -105,4 +120,3 @@
     <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
   </Package>
 </Wix>
-
